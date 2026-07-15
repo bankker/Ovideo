@@ -46,7 +46,8 @@ export const storyboardRoutes: FastifyPluginAsync<StoryboardRoutesOptions> = asy
           include: {
             tags: { include: { tag: true } },
             dialogue: { orderBy: { sortOrder: 'asc' } },
-            takes: true,
+            // takes 带 asset：分镜/视频页的抽卡画廊直接用 uri/thumbUri 渲染
+            takes: { include: { asset: true }, orderBy: { createdAt: 'asc' } },
           },
         },
       },

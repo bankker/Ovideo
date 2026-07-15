@@ -1,0 +1,151 @@
+// COMPOSE_CUT 执行器测试：用真 ffmpeg 生成两段 1 秒占位视频，跑完整合成链路。
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import fs from 'node:fs';
+import path from 'node:path';
+import type { Job } from '@prisma/client';
+import { createTestDb, type TestDb } from '../../test/testdb.js';
+import { makePlaceholderVideo, probeDurationMs } from '../../lib/ffmpeg.js';
+import { allocFilePath, fileSize, STORAGE_ROOT, uriToAbsPath } from '../../lib/storage.js';
+import { toJson } from '../../lib/json.js';
+import { clearExecutors, getExecutor } from '../job/registry.js';
+import { createCut } from './service.js';
+import { composeCut, registerCutExecutor } from './executor.js';
+
+let t: TestDb;
+let projectId: string;
+let episodeId: string;
+let storyboardId: string;
+let segmentAssetIds: string[];
+
+beforeAll(async () => {
+  t = await createTestDb();
+  const p = await t.db.project.create({ data: { name: 'cut 执行器测试项目' } });
+  projectId = p.id;
+  const episode = await t.db.episode.create({ data: { projectId, title: '第1集' } });
+  episodeId = episode.id;
+  const draft = await t.db.scriptDraft.create({ data: { episodeId, isMain: true } });
+  const sb = await t.db.storyboard.create({
+    data: { episodeId, scriptDraftId: draft.id, version: 1 },
+  });
+  storyboardId = sb.id;
+
+  // 两段 1 秒占位视频（真 ffmpeg 生成）→ 资产 + take + selected
+  segmentAssetIds = [];
+  const colors = ['steelblue', 'darkorange'];
+  for (let i = 0; i < 2; i++) {
+    const file = allocFilePath(projectId, 'mp4');
+    await makePlaceholderVideo({ outPath: file.absPath, durationMs: 1000, color: colors[i] });
+    const asset = await t.db.asset.create({
+      data: {
+        projectId,
+        type: 'VIDEO',
+        source: 'GENERATED',
+        uri: file.uri,
+        mime: 'video/mp4',
+        sizeBytes: fileSize(file.absPath),
+        durationMs: await probeDurationMs(file.absPath),
+      },
+    });
+    segmentAssetIds.push(asset.id);
+    const shot = await t.db.shot.create({
+      data: { storyboardId, sortOrder: i, sourceText: `镜头${i + 1}` },
+    });
+    const take = await t.db.take.create({
+      data: { shotId: shot.id, slot: 'VIDEO', assetId: asset.id },
+    });
+    await t.db.shot.update({ where: { id: shot.id }, data: { videoSelectedTakeId: take.id } });
+  }
+}, 60_000);
+
+afterAll(async () => {
+  clearExecutors();
+  await t.cleanup();
+  fs.rmSync(path.join(STORAGE_ROOT, projectId), { recursive: true, force: true });
+});
+
+async function makeJob(inputPayload: unknown): Promise<Job> {
+  return t.db.job.create({
+    data: {
+      projectId,
+      type: 'COMPOSE_CUT',
+      status: 'RUNNING',
+      inputJson: toJson(inputPayload),
+    },
+  });
+}
+
+describe('COMPOSE_CUT 执行器（真 ffmpeg）', () => {
+  it('registerCutExecutor 把执行器挂到 COMPOSE_CUT', () => {
+    clearExecutors();
+    expect(getExecutor('COMPOSE_CUT')).toBeUndefined();
+    registerCutExecutor();
+    expect(getExecutor('COMPOSE_CUT')).toBe(composeCut);
+  });
+
+  it(
+    '两段 1 秒片段 → FINAL 资产、时长≈2000ms、缩略图、血缘 parents=两段、Cut READY',
+    async () => {
+      const cut = await createCut(t.db, { episodeId, storyboardId });
+      const job = await makeJob({ cutId: cut.id });
+
+      const result = await composeCut({ db: t.db, job, updateProgress: async () => {} });
+      const assetId = result.outputAssetIds?.[0];
+      expect(assetId).toBeTruthy();
+
+      const asset = await t.db.asset.findUnique({ where: { id: assetId! } });
+      expect(asset).not.toBeNull();
+      expect(asset!.type).toBe('FINAL');
+      expect(asset!.source).toBe('GENERATED');
+      expect(asset!.jobId).toBe(job.id);
+      // 两段各 1s，合成后 ≈ 2000ms（编码封装误差容忍 ±400ms）
+      expect(asset!.durationMs).toBeGreaterThanOrEqual(1600);
+      expect(asset!.durationMs).toBeLessThanOrEqual(2400);
+      // 成片与缩略图都真实落盘
+      expect(fs.existsSync(uriToAbsPath(asset!.uri))).toBe(true);
+      expect(asset!.thumbUri).toBeTruthy();
+      expect(fs.existsSync(uriToAbsPath(asset!.thumbUri!))).toBe(true);
+
+      // 血缘：parents = 两个片段资产
+      const parents = await t.db.assetParent.findMany({ where: { childId: assetId! } });
+      expect(new Set(parents.map((r) => r.parentId))).toEqual(new Set(segmentAssetIds));
+
+      const after = await t.db.cut.findUnique({ where: { id: cut.id } });
+      expect(after!.status).toBe('READY');
+      expect(after!.outputAssetId).toBe(assetId);
+    },
+    120_000,
+  );
+
+  it('片段源文件缺失 → 执行器抛错且 Cut 置 FAILED', async () => {
+    const cut = await t.db.cut.create({
+      data: {
+        episodeId,
+        version: 99,
+        status: 'COMPOSING',
+        itemsJson: toJson([
+          {
+            shotId: 's1',
+            sortOrder: 0,
+            takeId: 'tk1',
+            assetId: segmentAssetIds[0],
+            uri: `/storage/${projectId}/不存在的片段.mp4`,
+            durationMs: 1000,
+          },
+        ]),
+      },
+    });
+    const job = await makeJob({ cutId: cut.id });
+    await expect(composeCut({ db: t.db, job, updateProgress: async () => {} })).rejects.toThrow(
+      '片段源文件不存在',
+    );
+    const after = await t.db.cut.findUnique({ where: { id: cut.id } });
+    expect(after!.status).toBe('FAILED');
+  });
+
+  it('cutId 不存在 → 404（无 Cut 可标 FAILED，直接抛）', async () => {
+    const job = await makeJob({ cutId: 'nope' });
+    await expect(composeCut({ db: t.db, job, updateProgress: async () => {} })).rejects.toThrow(
+      '成片 不存在',
+    );
+  });
+});

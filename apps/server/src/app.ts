@@ -18,12 +18,21 @@ import { providerRoutes } from './modules/provider/routes.js';
 import { scriptRoutes } from './modules/script/routes.js';
 import { storyboardRoutes } from './modules/storyboard/routes.js';
 
+import { designRoutes } from './modules/design/routes.js';
+import { dubbingRoutes } from './modules/dubbing/routes.js';
+import { generationRoutes } from './modules/generation/routes.js';
+import { cutRoutes } from './modules/cut/routes.js';
+import { libraryRoutes } from './modules/cut/library-routes.js';
+
 import { enqueueJob } from './modules/job/service.js';
 import { startWorker, type JobWorker } from './modules/job/worker.js';
 import { registerExecutor } from './modules/job/registry.js';
-import { registerMockMediaExecutors } from './modules/job/executors/mock-media.js';
 import { createStoryboardGenerator, mockTextGen } from './modules/script/generate.js';
 import { chatComplete } from './modules/provider/adapters/openai-compatible.js';
+import { openaiImageGenerate } from './modules/provider/adapters/openai-image.js';
+import { registerGenerationExecutors } from './modules/generation/executors.js';
+import { mockImageGen, mockVideoGen, mockTtsGen, type ImageGen, type VideoGen, type TtsGen } from './modules/generation/gens.js';
+import { registerCutExecutor } from './modules/cut/executor.js';
 import { findOrCreateTags } from './modules/tag/service.js';
 import * as stale from './modules/stale/service.js';
 
@@ -34,7 +43,32 @@ import * as stale from './modules/stale/service.js';
  * - 三步生成执行器按 job.input.modelConfigId 路由：有 → OpenAI 兼容适配器（真实厂商），无 → mockTextGen
  */
 export function registerExecutors(): void {
-  registerMockMediaExecutors();
+  // 生成执行器：modelConfigId 配了真实厂商（有 baseUrl）走对应适配器，否则 FFmpeg Mock。
+  // 明确不静默降级：选了真实厂商但该模态暂无适配器时报错，避免"以为在用付费模型其实是 Mock"。
+  const smartImageGen: ImageGen = async (args) => {
+    if (args.modelCfg?.baseUrl) {
+      await openaiImageGenerate(
+        { baseUrl: args.modelCfg.baseUrl, apiKey: args.modelCfg.apiKey, model: args.modelCfg.modelKey },
+        { prompt: args.prompt, outPath: args.outPath },
+      );
+      return;
+    }
+    return mockImageGen(args);
+  };
+  const smartVideoGen: VideoGen = async (args) => {
+    if (args.modelCfg?.baseUrl) {
+      throw new Error('该厂商的视频真实生成适配器将在 M3 接入（Seedance/海螺等），当前请使用 Mock 模型');
+    }
+    return mockVideoGen(args);
+  };
+  const smartTtsGen: TtsGen = async (args) => {
+    if (args.modelCfg?.baseUrl) {
+      throw new Error('该厂商的语音真实生成适配器将在 M3 接入，当前请使用 Mock 模型');
+    }
+    return mockTtsGen(args);
+  };
+  registerGenerationExecutors({ imageGen: smartImageGen, videoGen: smartVideoGen, ttsGen: smartTtsGen });
+  registerCutExecutor();
 
   registerExecutor('GENERATE_STORYBOARD', async (ctx) => {
     const input = parseJson<{ scriptDraftId?: string; modelConfigId?: string }>(
@@ -110,6 +144,14 @@ export async function buildApp(opts: BuildAppOptions = {}) {
     hooks: { onStoryboardPatched: stale.onStoryboardPatched },
     resolveTags: (projectId, tags) => findOrCreateTags(db, projectId, tags),
   });
+
+  // ---- M2 生成管线路由 ----
+  const enqueue = (input: Parameters<typeof enqueueJob>[1]) => enqueueJob(db, input);
+  await app.register(designRoutes, { db, enqueue });
+  await app.register(dubbingRoutes, { db, enqueue });
+  await app.register(generationRoutes, { db, enqueue });
+  await app.register(cutRoutes, { db, enqueue });
+  await app.register(libraryRoutes, { db });
 
   return app;
 }

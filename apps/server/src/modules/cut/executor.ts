@@ -1,0 +1,146 @@
+// COMPOSE_CUT 执行器：把 Cut.itemsJson 里的选定视频片段逐段转码到统一规格后
+// 用 concat demuxer 合并为 FINAL 资产（720x1280 / 24fps / H264+AAC）。
+// 铁律：血缘 parents = 全部片段资产；失败时 Cut 置 FAILED 后 rethrow（错误留给 Job 面板）。
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import type { Cut } from '@prisma/client';
+import { z } from 'zod';
+import { badRequest, notFound } from '../../lib/errors.js';
+import { extractFrame, probeDurationMs, runFfmpeg } from '../../lib/ffmpeg.js';
+import { parseJson } from '../../lib/json.js';
+import { allocFilePath, fileSize, uriToAbsPath } from '../../lib/storage.js';
+import { createAsset } from '../asset/service.js';
+import {
+  registerExecutor,
+  type JobExecutor,
+  type JobExecutorContext,
+  type JobExecutorResult,
+} from '../job/registry.js';
+import type { CutItem } from './service.js';
+
+const WIDTH = 720;
+const HEIGHT = 1280;
+const FPS = 24;
+
+const ComposeCutInputSchema = z.object({ cutId: z.string().min(1) });
+
+/** 统一规格的视频滤镜：等比缩放 + 居中补边 + 固定帧率（容错各段分辨率/帧率差异） */
+const VF = `scale=${WIDTH}:${HEIGHT}:force_original_aspect_ratio=decrease,pad=${WIDTH}:${HEIGHT}:(ow-iw)/2:(oh-ih)/2,fps=${FPS}`;
+
+/** 集成阶段（app 启动）调用一次 */
+export function registerCutExecutor(): void {
+  registerExecutor('COMPOSE_CUT', composeCut);
+}
+
+export const composeCut: JobExecutor = async (ctx) => {
+  const { db, job } = ctx;
+  const { cutId } = ComposeCutInputSchema.parse(parseJson<Record<string, unknown>>(job.inputJson, {}));
+  const cut = await db.cut.findUnique({ where: { id: cutId } });
+  if (!cut) throw notFound('成片');
+  try {
+    return await doCompose(ctx, cut);
+  } catch (err) {
+    // 失败先落 Cut 状态再 rethrow：Job 面板与美化页都能看到失败态
+    await db.cut
+      .update({ where: { id: cut.id }, data: { status: 'FAILED' } })
+      .catch(() => undefined);
+    throw err;
+  }
+};
+
+async function doCompose(ctx: JobExecutorContext, cut: Cut): Promise<JobExecutorResult> {
+  const { db, job, updateProgress } = ctx;
+  const items = parseJson<CutItem[]>(cut.itemsJson, []);
+  if (items.length === 0) throw badRequest('成片没有可合成的片段');
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ovideo-cut-'));
+  try {
+    // 1) 逐段转码到统一规格的临时文件
+    const segPaths: string[] = [];
+    for (let i = 0; i < items.length; i++) {
+      const src = uriToAbsPath(items[i].uri);
+      const seg = path.join(tmpDir, `seg-${String(i).padStart(3, '0')}.mp4`);
+      await transcodeSegment(src, seg);
+      segPaths.push(seg);
+      await updateProgress(Math.round(10 + (60 * (i + 1)) / items.length));
+    }
+
+    // 2) concat demuxer 合并（文件列表写临时 txt，路径转义单引号）
+    const listPath = path.join(tmpDir, 'concat.txt');
+    fs.writeFileSync(listPath, segPaths.map((p) => `file '${escapeConcatPath(p)}'`).join('\n'), 'utf8');
+    const out = allocFilePath(job.projectId, 'mp4');
+    await runFfmpeg(['-y', '-f', 'concat', '-safe', '0', '-i', listPath, '-c', 'copy', out.absPath]);
+    await updateProgress(80);
+
+    // 3) 探测时长 + 500ms 处抽帧做缩略图（片子比 500ms 还短时取中点兜底）
+    const durationMs = await probeDurationMs(out.absPath);
+    const thumb = allocFilePath(job.projectId, 'png');
+    const thumbAtMs = durationMs > 600 ? 500 : Math.max(0, Math.floor(durationMs / 2));
+    await extractFrame({ videoPath: out.absPath, timeMs: thumbAtMs, outPath: thumb.absPath });
+    await updateProgress(90);
+
+    // 4) FINAL 资产：血缘 parents = 全部片段资产（付费产物永不物理删除的溯源基础）
+    const asset = await createAsset(db, {
+      projectId: job.projectId,
+      type: 'FINAL',
+      source: 'GENERATED',
+      uri: out.uri,
+      mime: 'video/mp4',
+      sizeBytes: fileSize(out.absPath),
+      width: WIDTH,
+      height: HEIGHT,
+      durationMs,
+      jobId: job.id,
+      parentIds: items.map((it) => it.assetId),
+      meta: { cutId: cut.id, segmentCount: items.length },
+    });
+    // createAsset 不收 thumbUri（M1 冻结接口），补一笔 update
+    await db.asset.update({ where: { id: asset.id }, data: { thumbUri: thumb.uri } });
+
+    await db.cut.update({
+      where: { id: cut.id },
+      data: { status: 'READY', outputAssetId: asset.id },
+    });
+    return {
+      outputAssetIds: [asset.id],
+      output: { cutId: cut.id, outputAssetId: asset.id, durationMs },
+    };
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+}
+
+/** 单段转码：无音轨的源补静音轨，保证 concat 各段流布局一致 */
+async function transcodeSegment(srcPath: string, outPath: string): Promise<void> {
+  if (!fs.existsSync(srcPath)) {
+    throw badRequest(`片段源文件不存在：${srcPath}`);
+  }
+  const common = ['-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-ar', '44100', '-ac', '2'];
+  if (await hasAudioStream(srcPath)) {
+    await runFfmpeg(['-y', '-i', srcPath, '-vf', VF, ...common, outPath]);
+    return;
+  }
+  await runFfmpeg([
+    '-y',
+    '-i', srcPath,
+    '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100',
+    '-vf', VF,
+    ...common,
+    '-map', '0:v:0', '-map', '1:a:0', '-shortest',
+    outPath,
+  ]);
+}
+
+async function hasAudioStream(mediaPath: string): Promise<boolean> {
+  const out = await runFfmpeg(
+    ['-v', 'error', '-select_streams', 'a', '-show_entries', 'stream=codec_type', '-of', 'csv=p=0', mediaPath],
+    'ffprobe',
+  );
+  return out.trim().length > 0;
+}
+
+/** concat demuxer 列表项：反斜杠统一为正斜杠，单引号按 ffmpeg 规则转义 */
+function escapeConcatPath(p: string): string {
+  return p.replace(/\\/g, '/').replace(/'/g, `'\\''`);
+}

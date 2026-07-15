@@ -1,30 +1,37 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useState, type ComponentType } from 'react';
 import { Navigate, useNavigate, useParams } from 'react-router-dom';
 import { Badge, Button, Drawer, Tabs } from 'antd';
 import { ArrowLeftOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import { JobsPanel } from '../jobs/JobsPanel';
 import { useProjectJobs } from '../../api/workflow-hooks';
 import { ScriptStage } from './ScriptStage';
-import { StageStub } from './StageStub';
+import { DesignStage } from './DesignStage';
+import { MaterialStage } from './MaterialStage';
+import { DubbingStage } from './DubbingStage';
+import { StoryboardStage } from './StoryboardStage';
+import { VideoStage } from './VideoStage';
+import { EnhanceStage } from './EnhanceStage';
+import { FinalStage } from './FinalStage';
+import { LibraryPage } from '../library/LibraryPage';
+import { HistoryPage } from '../library/HistoryPage';
 
 interface StageDef {
   key: string;
   label: string;
-  /** script 之外的阶段所属里程碑（用于 StageStub 展示） */
-  milestone?: 'M2' | 'M3';
+  component: ComponentType;
 }
 
 const STAGES: StageDef[] = [
-  { key: 'script', label: '剧本' },
-  { key: 'design', label: '设计', milestone: 'M2' },
-  { key: 'material', label: '素材', milestone: 'M2' },
-  { key: 'dubbing', label: '配音', milestone: 'M2' },
-  { key: 'storyboard', label: '分镜', milestone: 'M2' },
-  { key: 'video', label: '视频', milestone: 'M2' },
-  { key: 'enhance', label: '美化', milestone: 'M3' },
-  { key: 'final', label: '成品', milestone: 'M3' },
-  { key: 'library', label: '素材库', milestone: 'M2' },
-  { key: 'history', label: '历史', milestone: 'M2' },
+  { key: 'script', label: '剧本', component: ScriptStage },
+  { key: 'design', label: '设计', component: DesignStage },
+  { key: 'material', label: '素材', component: MaterialStage },
+  { key: 'dubbing', label: '配音', component: DubbingStage },
+  { key: 'storyboard', label: '分镜', component: StoryboardStage },
+  { key: 'video', label: '视频', component: VideoStage },
+  { key: 'enhance', label: '美化', component: EnhanceStage },
+  { key: 'final', label: '成品', component: FinalStage },
+  { key: 'library', label: '素材库', component: LibraryPage },
+  { key: 'history', label: '历史', component: HistoryPage },
 ];
 
 /** 工作流壳：阶段导航 + 任务抽屉，路由 /projects/:projectId/episodes/:episodeId/:stage */
@@ -44,6 +51,7 @@ export function WorkflowShell() {
   if (!current) {
     return <Navigate to={`/projects/${projectId}/episodes/${episodeId}/script`} replace />;
   }
+  const StageComponent = current.component;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
@@ -79,11 +87,7 @@ export function WorkflowShell() {
       </div>
 
       <div style={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
-        {stage === 'script' ? (
-          <ScriptStage />
-        ) : (
-          <StageStub title={current.label} milestone={current.milestone ?? 'M2'} />
-        )}
+        <StageComponent />
       </div>
 
       <Drawer
