@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//f/xwechat_files/bankker_0ec3/temp/RWTemp/2026-07/a60ccd598fcd4dac85b4cb0b6b7004f7/**)",
+      "Bash(ffprobe -v error -show_format -show_streams \"/f/xwechat_files/bankker_0ec3/temp/RWTemp/2026-07/a60ccd598fcd4dac85b4cb0b6b7004f7/13bbeb96a10f0decc5c6f2b9b58e0de4.mp4\")",
+      "Bash(ffprobe -v error -select_streams a -show_streams \"/f/xwechat_files/bankker_0ec3/temp/RWTemp/2026-07/a60ccd598fcd4dac85b4cb0b6b7004f7/13bbeb96a10f0decc5c6f2b9b58e0de4.mp4\")",
+      "Bash(python -c \"import faster_whisper; print\\('faster_whisper OK'\\)\")",
+      "Bash(python -c \"import whisper; print\\('openai-whisper OK'\\)\")"
+    ]
+  }
+}

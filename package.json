@@ -1,0 +1,11 @@
+{
+  "name": "ovideo",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "dev": "pnpm --parallel --filter @ovideo/server --filter @ovideo/web dev",
+    "build": "pnpm -r build",
+    "test": "pnpm -r test"
+  },
+  "packageManager": "pnpm@10.17.0"
+}

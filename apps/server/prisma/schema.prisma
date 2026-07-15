@@ -1,0 +1,340 @@
+// AI 漫剧平台数据模型（v2 §1）。
+// SQLite 约束：枚举用 String（合法值 = @ovideo/shared 的 zod 枚举）；JSON 用 String（列名 *Json）。
+// 铁律：标签(Tag)与资产(Asset)属于项目级；绑定(Binding)属于分集/镜头级。
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Project {
+  id            String         @id @default(cuid())
+  name          String
+  description   String         @default("")
+  archived      Boolean        @default(false)
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  episodes      Episode[]
+  tags          Tag[]
+  assets        Asset[]
+  voiceProfiles VoiceProfile[]
+  jobs          Job[]
+}
+
+model Episode {
+  id           String        @id @default(cuid())
+  projectId    String
+  project      Project       @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  title        String
+  sortOrder    Int           @default(0)
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  scriptDrafts ScriptDraft[]
+  storyboards  Storyboard[]
+  bindings     Binding[]
+  cuts         Cut[]
+}
+
+// ---------- 标签与资产（项目级，一致性锚点） ----------
+
+model Tag {
+  id               String      @id @default(cuid())
+  projectId        String
+  project          Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  type             String // TagType: CHARACTER | SCENE | PROP
+  name             String
+  description      String      @default("")
+  canonicalAssetId String? // 该标签的默认参考设计图
+  canonicalAsset   Asset?      @relation("TagCanonical", fields: [canonicalAssetId], references: [id])
+  createdAt        DateTime    @default(now())
+  shotTags         ShotTag[]
+  bindings         Binding[]
+  designs          TagDesign[]
+
+  @@unique([projectId, name])
+}
+
+// 标签的候选设计图（一个标签下多张候选，其一为 canonical）
+model TagDesign {
+  id        String   @id @default(cuid())
+  tagId     String
+  tag       Tag      @relation(fields: [tagId], references: [id], onDelete: Cascade)
+  assetId   String
+  asset     Asset    @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([tagId, assetId])
+}
+
+model Asset {
+  id         String   @id @default(cuid())
+  projectId  String
+  project    Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  type       String // AssetType: IMAGE | VIDEO | AUDIO | FRAME | VOICE_SAMPLE | FINAL
+  source     String // AssetSource: GENERATED | UPLOADED | EXTRACTED
+  uri        String // /storage/<projectId>/<file>
+  thumbUri   String?
+  mime       String   @default("")
+  sizeBytes  Int      @default(0)
+  width      Int?
+  height     Int?
+  durationMs Int?
+  metaJson   String   @default("{}")
+  status     String   @default("ACTIVE") // AssetStatus: ACTIVE | RECYCLED
+  jobId      String? // 产出它的任务（血缘的一部分）
+  createdAt  DateTime @default(now())
+
+  parents        AssetParent[] @relation("child")
+  children       AssetParent[] @relation("parent")
+  tagCanonicalOf Tag[]         @relation("TagCanonical")
+  tagDesigns     TagDesign[]
+  bindings       Binding[]
+  takes          Take[]
+  dubbingLines   DubbingLine[]
+}
+
+// 资产血缘：child 由 parents 生成
+model AssetParent {
+  childId  String
+  child    Asset  @relation("child", fields: [childId], references: [id], onDelete: Cascade)
+  parentId String
+  parent   Asset  @relation("parent", fields: [parentId], references: [id], onDelete: Cascade)
+
+  @@id([childId, parentId])
+}
+
+// ---------- 剧本 / 分镜 ----------
+
+model ScriptDraft {
+  id          String       @id @default(cuid())
+  episodeId   String
+  episode     Episode      @relation(fields: [episodeId], references: [id], onDelete: Cascade)
+  title       String       @default("剧本稿")
+  content     String       @default("")
+  isMain      Boolean      @default(false)
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  storyboards Storyboard[]
+}
+
+model Storyboard {
+  id               String      @id @default(cuid())
+  episodeId        String
+  episode          Episode     @relation(fields: [episodeId], references: [id], onDelete: Cascade)
+  scriptDraftId    String
+  scriptDraft      ScriptDraft @relation(fields: [scriptDraftId], references: [id], onDelete: Cascade)
+  version          Int
+  stale            Boolean     @default(false)
+  staleReasonsJson String      @default("[]")
+  createdAt        DateTime    @default(now())
+  shots            Shot[]
+
+  @@unique([episodeId, version])
+}
+
+model Shot {
+  id                     String  @id @default(cuid())
+  storyboardId           String
+  storyboard             Storyboard @relation(fields: [storyboardId], references: [id], onDelete: Cascade)
+  sortOrder              Int
+  sourceText             String  @default("")
+  imagePrompt            String  @default("")
+  videoPrompt            String  @default("")
+  durationPlannedMs      Int     @default(12000)
+  durationLockedMs       Int?
+  groupId                String? // ShotGroup（M3 衔接组）
+  groupIndex             Int?
+  keyframeSelectedTakeId String?
+  videoSelectedTakeId    String?
+  keyframeStale          Boolean @default(false)
+  videoStale             Boolean @default(false)
+  staleReasonsJson       String  @default("[]")
+  createdAt              DateTime @default(now())
+
+  tags         ShotTag[]
+  dialogue     DialogueLine[]
+  dubbingLines DubbingLine[]
+  takes        Take[]
+  bindings     Binding[]
+}
+
+model ShotTag {
+  shotId String
+  shot   Shot   @relation(fields: [shotId], references: [id], onDelete: Cascade)
+  tagId  String
+  tag    Tag    @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([shotId, tagId])
+}
+
+model DialogueLine {
+  id           String        @id @default(cuid())
+  shotId       String
+  shot         Shot          @relation(fields: [shotId], references: [id], onDelete: Cascade)
+  speakerTagId String?
+  isNarrator   Boolean       @default(false)
+  text         String
+  sortOrder    Int           @default(0)
+  dubbingLines DubbingLine[]
+}
+
+// ---------- 绑定（分集级默认 + 镜头级覆盖） ----------
+// shotKey = shotId ?? ""（SQLite 唯一索引对 NULL 视为互不相同，用哨兵值保证
+// “每个 (episode, tag) 只有一条标签级默认绑定”的唯一性）。服务层负责维护 shotKey 一致。
+
+model Binding {
+  id        String   @id @default(cuid())
+  episodeId String
+  episode   Episode  @relation(fields: [episodeId], references: [id], onDelete: Cascade)
+  tagId     String
+  tag       Tag      @relation(fields: [tagId], references: [id], onDelete: Cascade)
+  shotId    String?
+  shot      Shot?    @relation(fields: [shotId], references: [id], onDelete: Cascade)
+  shotKey   String   @default("")
+  assetId   String
+  asset     Asset    @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  updatedAt DateTime @updatedAt
+
+  @@unique([episodeId, tagId, shotKey])
+}
+
+// ---------- 配音 ----------
+
+model VoiceProfile {
+  id               String        @id @default(cuid())
+  projectId        String
+  project          Project       @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  tagId            String?
+  name             String
+  providerModelKey String?
+  voiceId          String?
+  sampleAssetId    String?
+  createdAt        DateTime      @default(now())
+  dubbingLines     DubbingLine[]
+}
+
+model DubbingLine {
+  id             String        @id @default(cuid())
+  shotId         String
+  shot           Shot          @relation(fields: [shotId], references: [id], onDelete: Cascade)
+  dialogueLineId String?
+  dialogueLine   DialogueLine? @relation(fields: [dialogueLineId], references: [id])
+  voiceProfileId String?
+  voiceProfile   VoiceProfile? @relation(fields: [voiceProfileId], references: [id])
+  speed          Float         @default(1.0)
+  audioAssetId   String?
+  audioAsset     Asset?        @relation(fields: [audioAssetId], references: [id])
+  durationMs     Int?
+  status         String        @default("PENDING") // DubbingStatus
+  createdAt      DateTime      @default(now())
+}
+
+// ---------- 产物槽位（抽卡语义：N 个 take，一个 selected） ----------
+
+model Take {
+  id        String   @id @default(cuid())
+  shotId    String
+  shot      Shot     @relation(fields: [shotId], references: [id], onDelete: Cascade)
+  slot      String // TakeSlot: KEYFRAME | VIDEO
+  assetId   String
+  asset     Asset    @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  jobId     String?
+  createdAt DateTime @default(now())
+}
+
+// ---------- 成片 ----------
+
+model Cut {
+  id              String   @id @default(cuid())
+  episodeId       String
+  episode         Episode  @relation(fields: [episodeId], references: [id], onDelete: Cascade)
+  version         Int      @default(1)
+  itemsJson       String   @default("[]")
+  audioTracksJson String   @default("[]")
+  outputAssetId   String?
+  status          String   @default("DRAFT") // CutStatus
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+// ---------- 任务（v2 §7，唯一的生成动作底座） ----------
+
+model Job {
+  id               String    @id @default(cuid())
+  projectId        String
+  project          Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  type             String // JobType
+  status           String    @default("QUEUED") // JobStatus
+  progress         Int       @default(0)
+  executor         String    @default("MOCK") // JobExecutorKind
+  inputJson        String    @default("{}")
+  outputJson       String?
+  error            String?
+  providerConfigId String?
+  modelKey         String?
+  batchId          String?
+  attempts         Int       @default(0)
+  maxAttempts      Int       @default(2)
+  createdAt        DateTime  @default(now())
+  startedAt        DateTime?
+  finishedAt       DateTime?
+
+  @@index([status, createdAt])
+  @@index([projectId, createdAt])
+}
+
+// ---------- 厂商与模型能力（v2 §8） ----------
+
+model ProviderConfig {
+  id        String        @id @default(cuid())
+  name      String
+  vendor    String
+  category  String // ProviderCategory: TEXT | IMAGE | VIDEO | TTS
+  baseUrl   String        @default("")
+  apiKey    String        @default("")
+  enabled   Boolean       @default(true)
+  metaJson  String        @default("{}")
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+  models    ModelConfig[]
+}
+
+model ModelConfig {
+  id               String         @id @default(cuid())
+  providerConfigId String
+  provider         ProviderConfig @relation(fields: [providerConfigId], references: [id], onDelete: Cascade)
+  key              String
+  label            String
+  modality         String // Modality
+  capabilityJson   String         @default("{}")
+  enabled          Boolean        @default(true)
+  sortOrder        Int            @default(0)
+
+  @@unique([providerConfigId, key])
+}
+
+// ---------- M3 占位（建表不建功能） ----------
+
+model WorkflowTemplate {
+  id               String   @id @default(cuid())
+  name             String
+  category         String   @default("")
+  comfyJson        String   @default("{}")
+  placeholdersJson String   @default("[]")
+  enabled          Boolean  @default(true)
+  createdAt        DateTime @default(now())
+}
+
+model GpuNode {
+  id              String    @id @default(cuid())
+  name            String
+  token           String    @unique
+  status          String    @default("OFFLINE")
+  lastHeartbeatAt DateTime?
+  metaJson        String    @default("{}")
+  createdAt       DateTime  @default(now())
+}
