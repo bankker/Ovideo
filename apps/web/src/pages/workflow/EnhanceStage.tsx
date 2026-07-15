@@ -26,6 +26,7 @@ import {
   type ShotWithTakes,
   type TakeEntity,
 } from '../../api/video-hooks';
+import { useEnhanceShot, type EnhanceKind } from '../../api/enhance-hooks';
 
 const { Text } = Typography;
 
@@ -35,9 +36,6 @@ const CUT_STATUS_TAG: Record<CutStatus, { color: string; label: string }> = {
   READY: { color: 'success', label: '就绪' },
   FAILED: { color: 'error', label: '失败' },
 };
-
-/** M3 单段增强位（放大/补帧/对口型）：先留白禁用 */
-const ENHANCE_PLACEHOLDER_ACTIONS = ['放大', '补帧', '对口型'];
 
 /** 美化阶段（M3 v2.0 最小集）：选定视频片段清单 + 拼接合成成片 + 历史 Cut */
 export function EnhanceStage() {
@@ -232,7 +230,7 @@ export function EnhanceStage() {
   );
 }
 
-/** ---------- 单个片段卡片（缺失=红色；单段增强 M3 留白） ---------- */
+/** ---------- 单个片段卡片（缺失=红色；单段增强：放大/补帧可用，对口型留白） ---------- */
 
 function SegmentCard({
   shot,
@@ -243,11 +241,57 @@ function SegmentCard({
   take: TakeEntity | null;
   index: number;
 }) {
+  const qc = useQueryClient();
   const missing = take === null;
   const durationMs =
     take !== null
       ? (take.asset.durationMs ?? shot.durationLockedMs ?? shot.durationPlannedMs)
       : null;
+
+  /* ---------- 单段增强：POST enhance → 202 job → 轮询 → 成功后刷新分镜 ---------- */
+  const enhance = useEnhanceShot();
+  const [activeKind, setActiveKind] = useState<EnhanceKind | null>(null);
+  const [enhanceJobId, setEnhanceJobId] = useState<string | null>(null);
+  const enhanceJobQuery = useGenJob(enhanceJobId, 2000);
+  const enhanceJob = enhanceJobQuery.data;
+
+  useEffect(() => {
+    if (!enhanceJob || enhanceJob.id !== enhanceJobId) return;
+    if (enhanceJob.status === 'SUCCEEDED') {
+      message.success('增强完成，已替换为增强版片段');
+      void qc.invalidateQueries({ queryKey: ['storyboard', shot.storyboardId] });
+      setEnhanceJobId(null);
+      setActiveKind(null);
+    } else if (enhanceJob.status === 'FAILED') {
+      message.error(enhanceJob.error ?? `片段 #${index + 1} 增强失败`);
+      setEnhanceJobId(null);
+      setActiveKind(null);
+    } else if (enhanceJob.status === 'CANCELED') {
+      message.warning(`片段 #${index + 1} 增强任务已取消`);
+      setEnhanceJobId(null);
+      setActiveKind(null);
+    }
+  }, [enhanceJob, enhanceJobId, index, shot.storyboardId, qc]);
+
+  const enhancing = enhance.isPending || enhanceJobId !== null;
+
+  const handleEnhance = (kind: EnhanceKind) => {
+    if (missing || enhancing) return;
+    setActiveKind(kind);
+    enhance.mutate(
+      { shotId: shot.id, kind },
+      {
+        onSuccess: (job) => {
+          message.success('已提交增强任务');
+          setEnhanceJobId(job.id);
+        },
+        onError: (e) => {
+          message.error(e.message);
+          setActiveKind(null);
+        },
+      },
+    );
+  };
 
   return (
     <Card
@@ -304,15 +348,48 @@ function SegmentCard({
           {fmtSeconds(durationMs)}
         </Text>
       </div>
-      <Space size={4} style={{ marginTop: 6 }}>
-        {ENHANCE_PLACEHOLDER_ACTIONS.map((label) => (
-          <Tooltip key={label} title="M3 GPU 集群接入后开放">
-            <Button size="small" disabled style={{ fontSize: 11, padding: '0 6px' }}>
-              {label}
-            </Button>
-          </Tooltip>
-        ))}
+      <Space size={4} wrap style={{ marginTop: 6 }}>
+        <Tooltip title={missing ? '请先在视频阶段生成并选定视频' : undefined}>
+          <Button
+            size="small"
+            style={{ fontSize: 11, padding: '0 6px' }}
+            disabled={missing || (enhancing && activeKind !== 'upscale')}
+            loading={enhancing && activeKind === 'upscale'}
+            onClick={() => handleEnhance('upscale')}
+          >
+            高清放大
+          </Button>
+        </Tooltip>
+        <Tooltip
+          title={
+            missing ? '请先在视频阶段生成并选定视频' : 'CPU 补帧较慢，请耐心等待'
+          }
+        >
+          <Button
+            size="small"
+            style={{ fontSize: 11, padding: '0 6px' }}
+            disabled={missing || (enhancing && activeKind !== 'interpolate')}
+            loading={enhancing && activeKind === 'interpolate'}
+            onClick={() => handleEnhance('interpolate')}
+          >
+            智能补帧
+          </Button>
+        </Tooltip>
+        <Tooltip title="需 GPU 集群，M3 完整版开放">
+          <Button size="small" disabled style={{ fontSize: 11, padding: '0 6px' }}>
+            对口型
+          </Button>
+        </Tooltip>
       </Space>
+      {enhanceJobId !== null && (
+        <div style={{ marginTop: 4 }}>
+          <Text type="secondary" style={{ fontSize: 11 }}>
+            {enhanceJob?.status === 'RUNNING'
+              ? `增强中 ${enhanceJob.progress}%`
+              : '排队中……'}
+          </Text>
+        </div>
+      )}
     </Card>
   );
 }

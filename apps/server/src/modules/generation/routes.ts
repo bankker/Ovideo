@@ -65,8 +65,16 @@ export const generationRoutes: FastifyPluginAsync<GenerationRoutesOptions> = asy
   app.post<{ Params: { id: string } }>('/api/shots/:id/generate-video', async (req, reply) => {
     const { modelConfigId } = GenerateBodySchema.parse(req.body ?? {});
     const { shot, projectId } = await loadShotWithProject(req.params.id);
-    // 提前拦截（执行器内还会兜底校验）：无选定关键图时入队只会必然失败
-    if (!shot.keyframeSelectedTakeId) throw badRequest('请先生成并选定关键图');
+    // 提前拦截（执行器内还会兜底校验）：
+    // 衔接组段 >0 的首帧来自上一段尾帧（v2 §5），校验上一段已选定视频；其余镜头校验选定关键图
+    if (shot.groupId && (shot.groupIndex ?? 0) > 0) {
+      const prev = await db.shot.findFirst({
+        where: { storyboardId: shot.storyboardId, groupId: shot.groupId, groupIndex: (shot.groupIndex ?? 0) - 1 },
+      });
+      if (!prev?.videoSelectedTakeId) throw badRequest('衔接组需按顺序生成：请先完成上一段');
+    } else if (!shot.keyframeSelectedTakeId) {
+      throw badRequest('请先生成并选定关键图');
+    }
     const job = await enqueue({
       projectId,
       type: 'GENERATE_VIDEO',

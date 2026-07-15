@@ -29,6 +29,7 @@ export const JobTypeSchema = z.enum([
   'GENERATE_VIDEO',
   'GENERATE_TTS',
   'UPSCALE',
+  'INTERPOLATE',
   'EXTRACT_FRAME',
   'EXTRACT_AUDIO',
   'COMPOSE_CUT',

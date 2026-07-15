@@ -28,6 +28,10 @@ import { enqueueJob } from './modules/job/service.js';
 import { startWorker, type JobWorker } from './modules/job/worker.js';
 import { registerExecutor } from './modules/job/registry.js';
 import { createStoryboardGenerator, mockTextGen } from './modules/script/generate.js';
+import { createScriptChat, mockChatGen } from './modules/script/chat.js';
+import { shotGroupRoutes } from './modules/shotgroup/routes.js';
+import { enhanceRoutes } from './modules/enhance/routes.js';
+import { registerEnhanceExecutors } from './modules/enhance/executors.js';
 import { chatComplete } from './modules/provider/adapters/openai-compatible.js';
 import { openaiImageGenerate } from './modules/provider/adapters/openai-image.js';
 import { registerGenerationExecutors } from './modules/generation/executors.js';
@@ -69,6 +73,7 @@ export function registerExecutors(): void {
   };
   registerGenerationExecutors({ imageGen: smartImageGen, videoGen: smartVideoGen, ttsGen: smartTtsGen });
   registerCutExecutor();
+  registerEnhanceExecutors();
 
   registerExecutor('GENERATE_STORYBOARD', async (ctx) => {
     const input = parseJson<{ scriptDraftId?: string; modelConfigId?: string }>(
@@ -128,6 +133,23 @@ export async function buildApp(opts: BuildAppOptions = {}) {
   });
   await app.register(jobRoutes, { db });
   await app.register(providerRoutes, { db });
+  // 对话式剧本：请求时动态选第一个 enabled 的真实 TEXT 模型（有 baseUrl），无则走确定性 Mock
+  const chatTextGen = async (prompt: string): Promise<string> => {
+    const model = await db.modelConfig.findFirst({
+      where: { enabled: true, modality: 'text', provider: { enabled: true, category: 'TEXT', NOT: { baseUrl: '' } } },
+      include: { provider: true },
+      orderBy: { sortOrder: 'asc' },
+    });
+    if (model) {
+      return chatComplete(
+        { baseUrl: model.provider.baseUrl, apiKey: model.provider.apiKey, model: model.key },
+        [{ role: 'user', content: prompt }],
+        { jsonMode: true },
+      );
+    }
+    return mockChatGen(prompt);
+  };
+
   await app.register(scriptRoutes, {
     db,
     enqueue: (input) =>
@@ -138,6 +160,7 @@ export async function buildApp(opts: BuildAppOptions = {}) {
         inputPayload: input.inputPayload,
       }),
     hooks: { onScriptDraftChanged: stale.onScriptDraftChanged },
+    chat: createScriptChat({ textGen: chatTextGen }),
   });
   await app.register(storyboardRoutes, {
     db,
@@ -152,6 +175,8 @@ export async function buildApp(opts: BuildAppOptions = {}) {
   await app.register(generationRoutes, { db, enqueue });
   await app.register(cutRoutes, { db, enqueue });
   await app.register(libraryRoutes, { db });
+  await app.register(shotGroupRoutes, { db });
+  await app.register(enhanceRoutes, { db, enqueue });
 
   return app;
 }

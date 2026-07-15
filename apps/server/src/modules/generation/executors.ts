@@ -5,7 +5,7 @@ import { z } from 'zod';
 import type { PrismaClient } from '@prisma/client';
 import { badRequest, notFound } from '../../lib/errors.js';
 import { parseJson } from '../../lib/json.js';
-import { allocFilePath, fileSize } from '../../lib/storage.js';
+import { allocFilePath, fileSize, uriToAbsPath } from '../../lib/storage.js';
 import { extractFrame, probeDurationMs } from '../../lib/ffmpeg.js';
 import { registerExecutor, type JobExecutor } from '../job/registry.js';
 import { resolveBinding } from '../binding/service.js';
@@ -170,18 +170,75 @@ function makeDesignExecutor(gens: GenerationGens) {
   };
 }
 
-/** GENERATE_VIDEO：以选定关键图为首帧生成片段，实测时长 + 抽帧缩略图 */
+/**
+ * 衔接组（v2 §5）：抽取【前一段】（同 storyboardId + groupId、groupIndex-1）selected VIDEO take
+ * 的尾帧，存为 FRAME 资产（source=EXTRACTED，血缘指向前段视频），供本段作首帧。
+ */
+async function extractPrevSegmentTailFrame(
+  db: PrismaClient,
+  projectId: string,
+  jobId: string,
+  shot: { storyboardId: string; groupId: string | null; groupIndex: number | null },
+) {
+  const prev = await db.shot.findFirst({
+    where: {
+      storyboardId: shot.storyboardId,
+      groupId: shot.groupId,
+      groupIndex: (shot.groupIndex ?? 0) - 1,
+    },
+  });
+  const prevTake = prev?.videoSelectedTakeId
+    ? await db.take.findUnique({
+        where: { id: prev.videoSelectedTakeId },
+        include: { asset: true },
+      })
+    : null;
+  if (!prevTake) throw badRequest('衔接组需按顺序生成：请先完成上一段');
+
+  const videoAbs = uriToAbsPath(prevTake.asset.uri);
+  // 尾帧时间点：实测时长 - 100ms（资产落库时已存实测时长，缺失则现场 probe 兜底）
+  const actualMs = prevTake.asset.durationMs ?? (await probeDurationMs(videoAbs));
+  const file = allocFilePath(projectId, 'png');
+  await extractFrame({ videoPath: videoAbs, timeMs: Math.max(0, actualMs - 100), outPath: file.absPath });
+
+  const frameAsset = await createAsset(db, {
+    projectId,
+    type: 'FRAME',
+    source: 'EXTRACTED',
+    uri: file.uri,
+    mime: 'image/png',
+    sizeBytes: fileSize(file.absPath),
+    jobId,
+    parentIds: [prevTake.assetId],
+  });
+  await db.asset.update({ where: { id: frameAsset.id }, data: { thumbUri: file.uri } });
+  return frameAsset;
+}
+
+/** GENERATE_VIDEO：以选定关键图为首帧生成片段（衔接组段 1..N-1 改用上一段尾帧），实测时长 + 抽帧缩略图 */
 function makeVideoExecutor(gens: GenerationGens): JobExecutor {
   return async (ctx) => {
     const { db, job, updateProgress } = ctx;
     const input = VideoInputSchema.parse(parseJson<unknown>(job.inputJson, {}));
     const shot = await loadShot(db, input.shotId);
-    if (!shot.keyframeSelectedTakeId) throw badRequest('请先生成并选定关键图');
-    const keyframeTake = await db.take.findUnique({
-      where: { id: shot.keyframeSelectedTakeId },
-      include: { asset: true },
-    });
-    if (!keyframeTake) throw notFound('选定的关键图 take');
+
+    // 首帧来源：组内非首段 → 上一段选定视频的尾帧（v2 §5 强制串行）；否则 → 选定关键图（原逻辑）
+    let firstFrameUri: string;
+    let firstFrameParentIds: string[];
+    if (shot.groupId != null && (shot.groupIndex ?? 0) > 0) {
+      const frameAsset = await extractPrevSegmentTailFrame(db, job.projectId, job.id, shot);
+      firstFrameUri = frameAsset.uri;
+      firstFrameParentIds = [frameAsset.id];
+    } else {
+      if (!shot.keyframeSelectedTakeId) throw badRequest('请先生成并选定关键图');
+      const keyframeTake = await db.take.findUnique({
+        where: { id: shot.keyframeSelectedTakeId },
+        include: { asset: true },
+      });
+      if (!keyframeTake) throw notFound('选定的关键图 take');
+      firstFrameUri = keyframeTake.asset.uri;
+      firstFrameParentIds = [keyframeTake.assetId];
+    }
     const modelCfg = await resolveModelCfg(db, input.modelConfigId);
     await updateProgress(10);
 
@@ -191,7 +248,7 @@ function makeVideoExecutor(gens: GenerationGens): JobExecutor {
     const file = allocFilePath(job.projectId, 'mp4');
     await gens.videoGen({
       prompt,
-      firstFrameUri: keyframeTake.asset.uri,
+      firstFrameUri,
       durationMs,
       outPath: file.absPath,
       modelCfg,
@@ -216,7 +273,7 @@ function makeVideoExecutor(gens: GenerationGens): JobExecutor {
       sizeBytes: fileSize(file.absPath),
       durationMs: actualMs,
       jobId: job.id,
-      parentIds: [keyframeTake.assetId],
+      parentIds: firstFrameParentIds,
     });
     await db.asset.update({ where: { id: asset.id }, data: { thumbUri: thumbFile.uri } });
 

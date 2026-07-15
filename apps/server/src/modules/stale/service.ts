@@ -177,6 +177,39 @@ export async function onTakeSelected(db: PrismaClient, shotId: string, slot: Tak
     });
     return;
   }
+  // VIDEO：追加溯源记录；组内镜头额外向后传播（v2 §5 规则4：尾帧变了，后续段全部失效）。
+  // 无组镜头行为与既有一致：只记录、不改 stale 位。
+  const groupId = shot.groupId;
+  const groupIndex = shot.groupIndex;
+  if (groupId != null && groupIndex != null) {
+    const propagateReason = makeReason('take_selected', '上一段视频变更，衔接首帧失效');
+    await db.$transaction(async (tx) => {
+      await tx.shot.update({
+        where: { id: shotId },
+        data: {
+          staleReasonsJson: appendReason(
+            shot.staleReasonsJson,
+            makeReason('take_selected', 'video 更换 selected take（Cut 重排待 M3 实现）'),
+          ),
+        },
+      });
+      // 同组（同 storyboardId + groupId）中 groupIndex 更大的所有段
+      const laterSegments = await tx.shot.findMany({
+        where: { storyboardId: shot.storyboardId, groupId, groupIndex: { gt: groupIndex } },
+        orderBy: { groupIndex: 'asc' },
+      });
+      for (const seg of laterSegments) {
+        await tx.shot.update({
+          where: { id: seg.id },
+          data: {
+            videoStale: true,
+            staleReasonsJson: appendReason(seg.staleReasonsJson, propagateReason),
+          },
+        });
+      }
+    });
+    return;
+  }
   await db.shot.update({
     where: { id: shotId },
     data: {

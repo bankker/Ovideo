@@ -1,11 +1,13 @@
-import { useEffect, useState } from 'react';
+import { Fragment, useEffect, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import {
   Button,
   Card,
+  Divider,
   Empty,
   Input,
+  Popconfirm,
   Popover,
   Progress,
   Select,
@@ -17,7 +19,12 @@ import {
   Typography,
   message,
 } from 'antd';
-import { EditOutlined, ThunderboltOutlined, WarningOutlined } from '@ant-design/icons';
+import {
+  EditOutlined,
+  ScissorOutlined,
+  ThunderboltOutlined,
+  WarningOutlined,
+} from '@ant-design/icons';
 import { useApplyPatch, useStoryboards } from '../../api/workflow-hooks';
 import {
   fmtSeconds,
@@ -31,10 +38,24 @@ import {
   type ShotWithTakes,
   type TakeEntity,
 } from '../../api/video-hooks';
+import { getShotGroup, useSplitGroup } from '../../api/enhance-hooks';
 
 const { Text } = Typography;
 
 const GOLD = '#faad14';
+
+/** 衔接组内单段的展示元信息（v2 §5：首尾帧自动传递，强制串行生成） */
+interface GroupMeta {
+  /** 组内序号（0 起） */
+  index: number;
+  /** 组内总段数 */
+  total: number;
+  /** 是否需等待上一段：上一段（groupIndex-1）尚无 selected video */
+  waitPrev: boolean;
+}
+
+/** 衔接组拆分阈值：锁定时长超过 15s 的非组镜头提供「拆分为衔接组」 */
+const SPLIT_THRESHOLD_MS = 15000;
 
 /** 视频阶段：I2V 逐镜头生成视频片段（抽卡语义：takes 横排 + selected 金框） */
 export function VideoStage() {
@@ -83,6 +104,29 @@ export function VideoStage() {
 
   const shots = [...(storyboard?.shots ?? [])].sort((a, b) => a.sortOrder - b.sortOrder);
   const doneCount = shots.filter((s) => s.videoSelectedTakeId !== null).length;
+
+  /* ---------- 衔接组元信息（组内总数 / 是否等待上一段） ---------- */
+  const groupSizes = new Map<string, number>();
+  for (const s of shots) {
+    const { groupId } = getShotGroup(s);
+    if (groupId !== null) groupSizes.set(groupId, (groupSizes.get(groupId) ?? 0) + 1);
+  }
+  const prevSegmentHasVideo = (groupId: string, groupIndex: number): boolean => {
+    const prev = shots.find((s) => {
+      const g = getShotGroup(s);
+      return g.groupId === groupId && g.groupIndex === groupIndex - 1;
+    });
+    return prev !== undefined && prev.videoSelectedTakeId !== null;
+  };
+  const groupMetaOf = (shot: ShotWithTakes): GroupMeta | null => {
+    const { groupId, groupIndex } = getShotGroup(shot);
+    if (groupId === null || groupIndex === null) return null;
+    return {
+      index: groupIndex,
+      total: groupSizes.get(groupId) ?? 1,
+      waitPrev: groupIndex > 0 && !prevSegmentHasVideo(groupId, groupIndex),
+    };
+  };
 
   const versionOptions = [...(storyboards ?? [])]
     .sort((a, b) => b.version - a.version)
@@ -145,17 +189,36 @@ export function VideoStage() {
       ) : shots.length === 0 ? (
         <Empty description="该版本没有镜头" style={{ marginTop: 80 }} />
       ) : (
-        shots.map((shot, index) => (
-          <VideoShotCard
-            key={shot.id}
-            shot={shot}
-            index={index}
-            storyboardId={selectedStoryboardId ?? ''}
-            modelConfigId={modelConfigId}
-            patching={applyPatch.isPending}
-            onUpdatePrompt={updateVideoPrompt}
-          />
-        ))
+        shots.map((shot, index) => {
+          const group = groupMetaOf(shot);
+          const prevShot = index > 0 ? shots[index - 1] : undefined;
+          const isGroupStart =
+            group !== null &&
+            (prevShot === undefined ||
+              getShotGroup(prevShot).groupId !== getShotGroup(shot).groupId);
+          return (
+            <Fragment key={shot.id}>
+              {isGroupStart && (
+                <Divider orientation="left" plain style={{ margin: '16px 0 12px' }}>
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    衔接组（首尾帧自动传递，需按顺序生成）
+                  </Text>
+                </Divider>
+              )}
+              <VideoShotCard
+                shot={shot}
+                index={index}
+                group={group}
+                episodeId={episodeId}
+                storyboardId={selectedStoryboardId ?? ''}
+                modelConfigId={modelConfigId}
+                patching={applyPatch.isPending}
+                onUpdatePrompt={updateVideoPrompt}
+                onSwitchVersion={(id) => setSelectedStoryboardId(id)}
+              />
+            </Fragment>
+          );
+        })
       )}
     </div>
   );
@@ -166,19 +229,28 @@ export function VideoStage() {
 function VideoShotCard({
   shot,
   index,
+  group,
+  episodeId,
   storyboardId,
   modelConfigId,
   patching,
   onUpdatePrompt,
+  onSwitchVersion,
 }: {
   shot: ShotWithTakes;
   index: number;
+  group: GroupMeta | null;
+  episodeId: string;
   storyboardId: string;
   modelConfigId: string | undefined;
   patching: boolean;
   onUpdatePrompt: (shotId: string, videoPrompt: string) => Promise<void>;
+  onSwitchVersion: (storyboardId: string) => void;
 }) {
   const qc = useQueryClient();
+
+  /** 组内非首段：首帧来自上一段尾帧，且必须等上一段有 selected video */
+  const isChained = group !== null && group.index > 0;
 
   const takes = shot.takes ?? [];
   const videoTakes = takes.filter((t) => t.slot === 'VIDEO');
@@ -238,6 +310,22 @@ function VideoShotCard({
     );
   };
 
+  /* 拆分为衔接组（非组镜头且锁定时长 > 15s）→ 新分镜版本并切换 */
+  const splitGroup = useSplitGroup(episodeId);
+  const canSplit =
+    group === null &&
+    shot.durationLockedMs !== null &&
+    shot.durationLockedMs > SPLIT_THRESHOLD_MS;
+  const handleSplit = () => {
+    splitGroup.mutate(shot.id, {
+      onSuccess: (result) => {
+        message.success(`已拆分为衔接组，已切换到新分镜版本 v${result.storyboard.version}`);
+        onSwitchVersion(result.storyboard.id);
+      },
+      onError: (e) => message.error(e.message),
+    });
+  };
+
   /* stale 角标：溯源时间线 + 忽略 */
   const clearStale = useClearStale();
   const staleReasons = parseStaleReasons(shot.staleReasonsJson);
@@ -284,9 +372,15 @@ function VideoShotCard({
                 <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无选定视频" />
               </div>
             )}
-            {/* 首帧参考小图角标 */}
+            {/* 首帧参考小图角标（衔接组非首段：首帧 = 上一段尾帧自动传递） */}
             {selectedKeyframe !== null && (
-              <Tooltip title="首帧参考（分镜阶段选定的关键图）">
+              <Tooltip
+                title={
+                  isChained
+                    ? '上一段尾帧（衔接组自动传递）'
+                    : '首帧参考（分镜阶段选定的关键图）'
+                }
+              >
                 <div
                   style={{
                     position: 'absolute',
@@ -318,7 +412,7 @@ function VideoShotCard({
                       textAlign: 'center',
                     }}
                   >
-                    首帧
+                    {isChained ? '上一段尾帧' : '首帧'}
                   </div>
                 </div>
               </Tooltip>
@@ -360,6 +454,11 @@ function VideoShotCard({
         <div style={{ flex: 1, minWidth: 0 }}>
           <Space size={8} wrap style={{ marginBottom: 8 }}>
             <Text strong>#{index + 1}</Text>
+            {group !== null && (
+              <Tag color="purple" style={{ marginInlineEnd: 0 }}>
+                衔接 {group.index + 1}/{group.total}
+              </Tag>
+            )}
             <Text type="secondary">
               生成时长 {fmtSeconds(durationMs)}
               <Tag
@@ -467,18 +566,45 @@ function VideoShotCard({
           )}
 
           <Space size={8}>
-            <Tooltip title={hasKeyframe ? undefined : '请先在分镜阶段生成并选定关键图'}>
+            <Tooltip
+              title={
+                isChained
+                  ? group.waitPrev
+                    ? '衔接组需按顺序生成，请先完成上一段'
+                    : undefined
+                  : hasKeyframe
+                    ? undefined
+                    : '请先在分镜阶段生成并选定关键图'
+              }
+            >
               <Button
                 type="primary"
                 size="small"
                 icon={<ThunderboltOutlined />}
-                disabled={!hasKeyframe}
+                disabled={isChained ? group.waitPrev : !hasKeyframe}
                 loading={generating}
                 onClick={handleGenerate}
               >
                 {videoTakes.length > 0 ? '重抽' : '生成视频'}
               </Button>
             </Tooltip>
+            {canSplit && (
+              <Popconfirm
+                title="拆分为衔接组"
+                description="将按 15 秒拆分为多段并生成新分镜版本"
+                okText="拆分"
+                cancelText="取消"
+                onConfirm={handleSplit}
+              >
+                <Button
+                  size="small"
+                  icon={<ScissorOutlined />}
+                  loading={splitGroup.isPending}
+                >
+                  拆分为衔接组
+                </Button>
+              </Popconfirm>
+            )}
             {jobId !== null && (
               <Text type="secondary" style={{ fontSize: 12 }}>
                 {job?.status === 'RUNNING' ? `生成中 ${job.progress}%` : '排队中……'}
