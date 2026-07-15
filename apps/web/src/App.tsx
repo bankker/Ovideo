@@ -1,4 +1,22 @@
-/** 占位壳：M1-D 阶段由页面任务填充路由与布局 */
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { AppLayout } from './layouts/AppLayout';
+import { ProjectsPage } from './pages/projects/ProjectsPage';
+import { EpisodesPage } from './pages/projects/EpisodesPage';
+import { WorkflowShell } from './pages/workflow/WorkflowShell';
+import { ProvidersPage } from './pages/admin/ProvidersPage';
+
 export function App() {
-  return <div style={{ padding: 24 }}>Ovideo · AI 漫剧创作平台（前端骨架待 M1-D 实现）</div>;
+  return (
+    <BrowserRouter>
+      <Routes>
+        <Route element={<AppLayout />}>
+          <Route path="/" element={<ProjectsPage />} />
+          <Route path="/projects/:projectId" element={<EpisodesPage />} />
+          <Route path="/projects/:projectId/episodes/:episodeId/:stage" element={<WorkflowShell />} />
+          <Route path="/admin/providers" element={<ProvidersPage />} />
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Route>
+      </Routes>
+    </BrowserRouter>
+  );
 }

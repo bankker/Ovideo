@@ -1,6 +1,14 @@
 import type { FastifyInstance } from 'fastify';
 import { ZodError } from 'zod';
 
+/** 鸭子类型判定：shared 包与 server 可能解析到两份 zod 实例，instanceof 不可靠 */
+function isZodError(err: unknown): err is ZodError {
+  return (
+    err instanceof ZodError ||
+    (err instanceof Error && err.name === 'ZodError' && Array.isArray((err as { issues?: unknown }).issues))
+  );
+}
+
 export class AppError extends Error {
   statusCode: number;
   constructor(statusCode: number, message: string) {
@@ -18,7 +26,7 @@ export function registerErrorHandler(app: FastifyInstance) {
     if (err instanceof AppError) {
       return reply.status(err.statusCode).send({ error: err.message });
     }
-    if (err instanceof ZodError) {
+    if (isZodError(err)) {
       return reply.status(400).send({ error: '参数校验失败', issues: err.issues });
     }
     app.log.error(err);

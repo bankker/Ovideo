@@ -2,13 +2,11 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { fileURLToPath } from 'node:url';
 import { PrismaClient } from '@prisma/client';
+import { templateDbPath } from './global-setup.js';
 
-const TEMPLATE = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  '../../prisma/test-template.db',
-);
+// vitest threads 池的 worker 与主进程同 PID，路径与 globalSetup 生成的一致
+const TEMPLATE = templateDbPath();
 
 export interface TestDb {
   db: PrismaClient;
