@@ -65,7 +65,8 @@ export interface CutEntity {
   id: string;
   episodeId: string;
   version: number;
-  itemsJson: string;
+  /** 服务端已把 itemsJson 解析为对象数组返回 */
+  items: CutItem[];
   audioTracksJson: string;
   outputAssetId: string | null;
   status: CutStatus;

@@ -16,7 +16,6 @@ import { DownloadOutlined } from '@ant-design/icons';
 import type { CutStatus } from '@ovideo/shared';
 import {
   fmtSeconds,
-  parseCutItems,
   useCut,
   useCuts,
   type CutDetail,
@@ -124,7 +123,7 @@ export function FinalStage() {
 /** ---------- 单个 Cut 的展示 ---------- */
 
 function CutPlayer({ cut }: { cut: CutDetail }) {
-  const items = parseCutItems(cut.itemsJson);
+  const items = cut.items ?? [];
 
   if (cut.status === 'COMPOSING') {
     return (
