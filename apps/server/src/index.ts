@@ -2,7 +2,8 @@ import 'dotenv/config';
 import { buildApp, startRuntime } from './app.js';
 import { db } from './lib/db.js';
 
-const port = Number(process.env.PORT || 8787);
+// 用专属变量名：预览/托管环境常注入通用 PORT（如 5173），会与前端端口冲突
+const port = Number(process.env.OVIDEO_SERVER_PORT || 8787);
 
 const app = await buildApp({ db });
 const worker = startRuntime(db);
