@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import {
   Button,
   Card,
   Empty,
+  Input,
   Modal,
   Select,
   Space,
@@ -15,9 +16,9 @@ import {
   message,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
-import { PlusOutlined } from '@ant-design/icons';
+import { EditOutlined, PlusOutlined } from '@ant-design/icons';
 import type { TagType } from '@ovideo/shared';
-import { useStoryboard, useStoryboards } from '../../api/workflow-hooks';
+import { useApplyPatch, useStoryboard, useStoryboards } from '../../api/workflow-hooks';
 import {
   useEpisodeBindings,
   usePutBinding,
@@ -69,8 +70,16 @@ export function MaterialStage() {
   const storyboards = storyboardsQuery.data;
   const [selectedStoryboardId, setSelectedStoryboardId] = useState<string | null>(null);
 
+  // patch 产出新版本时，列表刷新前先记下目标版本，防止选择被重置回旧版本（竞态）
+  const pendingSelectRef = useRef<string | null>(null);
+
   useEffect(() => {
     if (!storyboards || storyboards.length === 0) return;
+    if (pendingSelectRef.current && storyboards.some((s) => s.id === pendingSelectRef.current)) {
+      setSelectedStoryboardId(pendingSelectRef.current);
+      pendingSelectRef.current = null;
+      return;
+    }
     if (selectedStoryboardId !== null && storyboards.some((s) => s.id === selectedStoryboardId))
       return;
     const latest = storyboards.reduce((a, b) => (b.version > a.version ? b : a));
@@ -86,6 +95,28 @@ export function MaterialStage() {
   const resolved = resolvedQuery.data;
   const storyboardQuery = useStoryboard(selectedStoryboardId);
   const bindingsQuery = useEpisodeBindings(episodeId);
+
+  /* ---------- 提示词就地编辑（@ 引用管理，与分镜页同一套 patch 版本机制） ---------- */
+  const applyPatch = useApplyPatch(episodeId);
+  const patching = applyPatch.isPending;
+  const savePrompt = (shotId: string, imagePrompt: string) => {
+    if (selectedStoryboardId === null) return;
+    applyPatch.mutate(
+      {
+        storyboardId: selectedStoryboardId,
+        patch: [{ op: 'update_shot', shotId, fields: { imagePrompt } }],
+      },
+      {
+        onSuccess: (result) => {
+          // 切到 patch 产出的新版本；版本列表可能尚未刷新，记入待选引用防止被重置
+          pendingSelectRef.current = result.storyboard.id;
+          setSelectedStoryboardId(result.storyboard.id);
+          message.success('提示词已更新（生成了新分镜版本）');
+        },
+        onError: (e) => message.error(e.message),
+      },
+    );
+  };
 
   /** 本分镜出现过的标签（按首次出现顺序去重）→ 表格列 + 顶部默认绑定卡片 */
   const uniqueTags = useMemo<TagColumn[]>(() => {
@@ -160,20 +191,21 @@ export function MaterialStage() {
   /* ---------- 表格 ---------- */
   const columns: ColumnsType<ResolvedBindingShotRow> = [
     {
-      title: '镜头',
+      title: '镜头（点击提示词可编辑 @ 引用）',
       key: 'shot',
       fixed: 'left',
-      width: 240,
+      width: 300,
       render: (_, row, index) => (
         <div>
           <Text strong>#{index + 1}</Text>
           <Paragraph
             type="secondary"
-            style={{ fontSize: 12, marginBottom: 0, marginTop: 2 }}
+            style={{ fontSize: 12, marginBottom: 4, marginTop: 2 }}
             ellipsis={{ rows: 2, tooltip: sourceTextByShotId.get(row.shotId) }}
           >
             {sourceTextByShotId.get(row.shotId) ?? ''}
           </Paragraph>
+          <PromptMentionEditor row={row} onSave={(prompt) => savePrompt(row.shotId, prompt)} saving={patching} />
         </div>
       ),
     },
@@ -325,6 +357,83 @@ export function MaterialStage() {
 }
 
 /** ---------- 单元格：解析图缩略 + 来源徽标 ---------- */
+
+/**
+ * 提示词就地编辑器（素材页的 @ 引用管理入口）：
+ * 展示态高亮 @提及，点击进入编辑；保存走 apply-patch（产出新分镜版本，旧版本可回切）。
+ */
+function PromptMentionEditor({
+  row,
+  saving,
+  onSave,
+}: {
+  row: ResolvedBindingShotRow;
+  saving: boolean;
+  onSave: (imagePrompt: string) => void;
+}) {
+  const [editing, setEditing] = useState<string | null>(null);
+
+  if (editing !== null) {
+    return (
+      <div onClick={(e) => e.stopPropagation()}>
+        <Input.TextArea
+          value={editing}
+          autoSize={{ minRows: 2, maxRows: 6 }}
+          style={{ fontSize: 12 }}
+          onChange={(e) => setEditing(e.target.value)}
+        />
+        <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 2 }}>
+          @角色/@道具 上参考位；@场景 仅锚定文字；@!场景 强制上参考
+        </Text>
+        <Space style={{ marginTop: 4 }}>
+          <Button
+            size="small"
+            type="primary"
+            loading={saving}
+            onClick={() => {
+              onSave(editing);
+              setEditing(null);
+            }}
+          >
+            保存
+          </Button>
+          <Button size="small" onClick={() => setEditing(null)}>
+            取消
+          </Button>
+        </Space>
+      </div>
+    );
+  }
+
+  // 展示态：@提及 渲染为蓝色 token，一眼看出该镜头引用了谁
+  const parts = (row.imagePrompt || '').split(/(@!?[^\s@!，。；、,;.!？?！:：()（）【】[\]"'`]+)/g);
+  return (
+    <div
+      onClick={() => setEditing(row.imagePrompt)}
+      style={{ cursor: 'pointer', fontSize: 12, lineHeight: '20px' }}
+      title="点击编辑生图提示词（管理 @ 引用）"
+    >
+      <Text type="secondary" style={{ fontSize: 11 }}>
+        生图 Prompt <EditOutlined style={{ fontSize: 10 }} />：
+      </Text>
+      <Paragraph style={{ fontSize: 12, marginBottom: 0 }} ellipsis={{ rows: 2, expandable: true, symbol: '展开' }}>
+        {row.imagePrompt === '' ? (
+          <Text type="secondary">（空，点击填写）</Text>
+        ) : (
+          parts.map((p, i) =>
+            p.startsWith('@') ? (
+              <Text key={i} style={{ fontSize: 12, color: '#1677ff', fontWeight: 600 }}>
+                {p}
+              </Text>
+            ) : (
+              <span key={i}>{p}</span>
+            ),
+          )
+        )}
+      </Paragraph>
+    </div>
+  );
+}
 
 /** 参考位状态标注（与生成逻辑同一套规则，见 utils/ref-policy） */
 const PARTICIPATION_META: Record<string, { color: string; label: string; tip: string }> = {
