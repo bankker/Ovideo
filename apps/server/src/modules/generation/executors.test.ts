@@ -224,6 +224,65 @@ describe('GENERATE_IMAGE / kind=keyframe（假 Gen）', () => {
   });
 });
 
+describe('GENERATE_IMAGE / kind=keyframe：@ 显式指定参考图', () => {
+  it('@标签名 → 参考图完全由 @ 决定（顺序=@顺序，可含场景图），@ 剥掉名字保留', async () => {
+    const { gens, imageCalls } = makeFakeGens();
+    registerGenerationExecutors(gens);
+    const exec = getExecutor('GENERATE_IMAGE')!;
+
+    const assetHero = await makeUploadedAsset();
+    const assetScene = await makeUploadedAsset();
+    const tagHero = await db.tag.create({
+      data: { projectId, type: 'CHARACTER', name: `英雄甲-${crypto.randomUUID().slice(0, 6)}`, canonicalAssetId: assetHero.id },
+    });
+    const tagScene = await db.tag.create({
+      data: { projectId, type: 'SCENE', name: `天台-${crypto.randomUUID().slice(0, 6)}`, canonicalAssetId: assetScene.id },
+    });
+    // 镜头本身还挂着一个"不该被带上"的干扰标签（有设计图但未被 @）
+    const assetOther = await makeUploadedAsset();
+    const tagOther = await db.tag.create({
+      data: { projectId, type: 'CHARACTER', name: `路人乙-${crypto.randomUUID().slice(0, 6)}`, canonicalAssetId: assetOther.id },
+    });
+    const { shot } = await seedShot({
+      imagePrompt: `@${tagScene.name} 上，@${tagHero.name} 迎风而立`,
+      tags: { create: [{ tagId: tagOther.id }, { tagId: tagHero.id }] },
+    });
+
+    const ctx = await makeCtx('GENERATE_IMAGE', { kind: 'keyframe', shotId: shot.id });
+    const r = await exec(ctx);
+
+    // 参考图 = @ 的两个标签（场景在前，尊重 @ 顺序），干扰标签未被携带
+    const asset = await db.asset.findUnique({ where: { id: (r.outputAssetIds ?? [])[0] } });
+    const parents = await parentIdsOf(asset!.id);
+    expect(parents).toEqual([assetHero.id, assetScene.id].sort());
+    expect(imageCalls[0]!.refUris).toEqual([assetScene.uri, assetHero.uri]);
+    // 提及处的 @ 剥掉、名字保留（一致性说明里的"@指定"标注不受影响）
+    expect(imageCalls[0]!.prompt).not.toContain(`@${tagScene.name}`);
+    expect(imageCalls[0]!.prompt).not.toContain(`@${tagHero.name}`);
+    expect(imageCalls[0]!.prompt).toContain(`${tagScene.name} 上，${tagHero.name} 迎风而立`);
+    expect(imageCalls[0]!.prompt).toContain('@指定');
+  });
+
+  it('@ 不存在的标签 → 明确报错；@ 无设计图的标签 → 明确报错', async () => {
+    const { gens } = makeFakeGens();
+    registerGenerationExecutors(gens);
+    const exec = getExecutor('GENERATE_IMAGE')!;
+
+    const { shot: s1 } = await seedShot({ imagePrompt: '@不存在的角色 走过' });
+    await expect(exec(await makeCtx('GENERATE_IMAGE', { kind: 'keyframe', shotId: s1.id }))).rejects.toThrow(
+      /@ 指定的标签「不存在的角色」不存在/,
+    );
+
+    const bare = await db.tag.create({
+      data: { projectId, type: 'CHARACTER', name: `无图丙-${crypto.randomUUID().slice(0, 6)}` },
+    });
+    const { shot: s2 } = await seedShot({ imagePrompt: `@${bare.name} 走过` });
+    await expect(exec(await makeCtx('GENERATE_IMAGE', { kind: 'keyframe', shotId: s2.id }))).rejects.toThrow(
+      /还没有设计图/,
+    );
+  });
+});
+
 describe('GENERATE_IMAGE / kind=design（假 Gen）', () => {
   it('无 canonical：参考图为空，产出 TagDesign 并自动设为 canonical', async () => {
     const { gens, imageCalls } = makeFakeGens();

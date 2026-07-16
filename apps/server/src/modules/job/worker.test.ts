@@ -25,8 +25,9 @@ beforeEach(() => {
   clearExecutors();
 });
 
-/** 轮询等待条件成立（worker 是异步轮询模型，测试只能等） */
-async function waitFor(cond: () => Promise<boolean>, timeoutMs = 8000, stepMs = 25): Promise<void> {
+/** 轮询等待条件成立（worker 是异步轮询模型，测试只能等）。
+ * 预算放宽到 25s：全量套件并行时 CPU 争抢严重（含真 ffmpeg 用例），8s 会偶发误报。 */
+async function waitFor(cond: () => Promise<boolean>, timeoutMs = 25000, stepMs = 25): Promise<void> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     if (await cond()) return;

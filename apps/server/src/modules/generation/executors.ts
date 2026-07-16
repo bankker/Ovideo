@@ -66,6 +66,29 @@ async function resolveModelCfg(
 }
 
 /** 读镜头（含分镜、标签），不存在抛 404 */
+const TAG_TYPE_LABEL: Record<string, string> = { CHARACTER: '角色', SCENE: '场景', PROP: '道具' };
+const TAG_TYPE_ORDER: Record<string, number> = { CHARACTER: 0, PROP: 1, SCENE: 2 };
+
+/**
+ * 解析提示词中的 @标签名 提及（显式指定参考图）。
+ * 标签名以空白或常见标点结尾；保持出现顺序、去重。
+ */
+const MENTION_RE = /@([^\s@，。；、,;.!？?！:：()（）【】\[\]"'`]+)/g;
+
+export function parseMentions(prompt: string): string[] {
+  const names: string[] = [];
+  for (const m of prompt.matchAll(MENTION_RE)) {
+    const name = m[1].trim();
+    if (name && !names.includes(name)) names.push(name);
+  }
+  return names;
+}
+
+/** 发给模型前剥掉 @ 符号（名字保留在文字里继续起提示作用） */
+export function stripMentions(prompt: string): string {
+  return prompt.replace(MENTION_RE, '$1');
+}
+
 async function loadShot(db: PrismaClient, shotId: string) {
   const shot = await db.shot.findUnique({
     where: { id: shotId },
@@ -87,41 +110,63 @@ function makeKeyframeExecutor(gens: GenerationGens) {
     const modelCfg = await resolveModelCfg(db, input.modelConfigId);
     await updateProgress(10);
 
-    // 【执行时】逐标签实时解析绑定（Bug6 防复发：任务排队期间换绑，这里拿到的是最新绑定）；
-    // 未绑定时回落到该标签的默认设计图（canonical）——设计好的角色/场景无需手动绑定即可参与生图。
-    // 【参考位策略】实测结论（Seedream 4.0 多参考注意力有限）：只送角色图时形象稳定，
-    // 掺入场景图会稀释角色特征（角色被"人化"）。因此角色/道具参考优先，
-    // 场景参考只在没有任何角色参考（纯空镜）时才送；场景观感交由文字提示词描述。
-    const TAG_TYPE_LABEL: Record<string, string> = { CHARACTER: '角色', SCENE: '场景', PROP: '道具' };
-    const TAG_TYPE_ORDER: Record<string, number> = { CHARACTER: 0, PROP: 1, SCENE: 2 };
-    const orderedTags = [...shot.tags].sort(
-      (a, b) => (TAG_TYPE_ORDER[a.tag.type] ?? 9) - (TAG_TYPE_ORDER[b.tag.type] ?? 9),
-    );
+    const rawPrompt = shot.imagePrompt || shot.sourceText;
+    const mentions = parseMentions(rawPrompt);
     const resolved: Array<{ assetId: string; note: string; isScene: boolean }> = [];
-    for (const shotTag of orderedTags) {
-      const assetId =
-        (await resolveBinding(db, episodeId, shotTag.tagId, shot.id)) ??
-        shotTag.tag.canonicalAssetId;
-      if (assetId) {
-        // 标签描述（如"卡通小猴子"）一并写入——只有参考图而不点明形象时，模型容易画成默认人形
-        const desc = shotTag.tag.description ? `，${shotTag.tag.description.slice(0, 60)}` : '';
+
+    if (mentions.length > 0) {
+      // 【@ 显式指定】提示词含 @标签名 时，参考图完全由 @ 决定（顺序=@ 出现顺序），
+      // 不再自动携带镜头标签；显式指定采取严格校验：标签不存在/没图直接报错。
+      const projectTags = await db.tag.findMany({ where: { projectId: job.projectId } });
+      const byName = new Map(projectTags.map((t) => [t.name, t]));
+      for (const name of mentions) {
+        const tag = byName.get(name);
+        if (!tag) throw badRequest(`@ 指定的标签「${name}」不存在（设计页可查看全部标签）`);
+        const assetId = (await resolveBinding(db, episodeId, tag.id, shot.id)) ?? tag.canonicalAssetId;
+        if (!assetId) throw badRequest(`@ 指定的标签「${name}」还没有设计图，请先在设计页生成或上传`);
+        if (resolved.some((r) => r.assetId === assetId)) continue;
+        const desc = tag.description ? `，${tag.description.slice(0, 60)}` : '';
         resolved.push({
           assetId,
-          note: `${shotTag.tag.name}（${TAG_TYPE_LABEL[shotTag.tag.type] ?? shotTag.tag.type}${desc}）`,
-          isScene: shotTag.tag.type === 'SCENE',
+          note: `${name}（${TAG_TYPE_LABEL[tag.type] ?? tag.type}${desc}，@指定）`,
+          isScene: tag.type === 'SCENE',
         });
       }
+    } else {
+      // 【自动策略】逐标签实时解析绑定（Bug6 防复发），未绑定回落默认设计图（canonical）。
+      // 实测结论（Seedream 4.0 多参考注意力有限）：只送角色图时形象稳定，掺入场景图会稀释
+      // 角色特征——因此角色/道具优先，场景参考只在纯空镜时才送。
+      const orderedTags = [...shot.tags].sort(
+        (a, b) => (TAG_TYPE_ORDER[a.tag.type] ?? 9) - (TAG_TYPE_ORDER[b.tag.type] ?? 9),
+      );
+      for (const shotTag of orderedTags) {
+        const assetId =
+          (await resolveBinding(db, episodeId, shotTag.tagId, shot.id)) ??
+          shotTag.tag.canonicalAssetId;
+        if (assetId) {
+          // 标签描述（如"卡通小猴子"）一并写入——只有参考图而不点明形象时，模型容易画成默认人形
+          const desc = shotTag.tag.description ? `，${shotTag.tag.description.slice(0, 60)}` : '';
+          resolved.push({
+            assetId,
+            note: `${shotTag.tag.name}（${TAG_TYPE_LABEL[shotTag.tag.type] ?? shotTag.tag.type}${desc}）`,
+            isScene: shotTag.tag.type === 'SCENE',
+          });
+        }
+      }
     }
+
     const characterRefs = resolved.filter((r) => !r.isScene);
-    const chosen = characterRefs.length > 0 ? characterRefs : resolved;
+    // @ 显式指定尊重用户选择（含场景图也照发）；自动策略下才做角色优先裁剪
+    const chosen = mentions.length > 0 ? resolved : characterRefs.length > 0 ? characterRefs : resolved;
     const boundAssetIds = chosen.map((r) => r.assetId);
     const refTagNotes = chosen.map((r, i) => `参考图${i + 1}：${r.note}`);
     const boundAssets = await db.asset.findMany({ where: { id: { in: boundAssetIds } } });
     const byId = new Map(boundAssets.map((a) => [a.id, a]));
     const refUris = boundAssetIds.map((id) => byId.get(id)?.uri).filter((u): u is string => !!u);
 
-    // 一致性说明放在提示词【开头】（模型对前部 token 权重更高），并硬性禁止角色人格化
-    const basePrompt = shot.imagePrompt || shot.sourceText;
+    // 一致性说明放在提示词【开头】（模型对前部 token 权重更高），并硬性禁止角色人格化；
+    // @ 符号发给模型前剥掉（名字保留）
+    const basePrompt = stripMentions(rawPrompt);
     const prompt =
       refTagNotes.length > 0
         ? `【形象一致性】${refTagNotes.join('；')}。角色的物种与形态严格按参考图，严禁把动物/机器人角色画成人类。\n${basePrompt}`
