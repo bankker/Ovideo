@@ -69,7 +69,8 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     models: [
       preset('doubao-seed-1-6-250615', 'Doubao Seed 1.6', 'text', true),
       preset('doubao-1-5-pro-32k-250115', 'Doubao 1.5 Pro 32K', 'text', false),
-      preset('doubao-seedream-3-0-t2i-250415', 'Seedream 3.0 文生图', 'image', true),
+      preset('doubao-seedream-4-0-250828', 'Seedream 4.0 文生图', 'image', true),
+      preset('doubao-seedream-3-0-t2i-250415', 'Seedream 3.0 文生图（旧版，部分账号无权限）', 'image', false),
       preset('doubao-seedance-1-0-pro', 'Seedance 1.0 Pro 视频', 'video', false, '视频适配器 M3 接入后可用'),
     ],
   },
