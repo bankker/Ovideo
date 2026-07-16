@@ -27,6 +27,7 @@ import {
   type ResolvedBindingCell,
   type ResolvedBindingShotRow,
 } from '../../api/design-hooks';
+import { computeParticipation } from '../../utils/ref-policy';
 
 const { Text, Paragraph } = Typography;
 
@@ -188,7 +189,14 @@ export function MaterialStage() {
         render: (_: unknown, row: ResolvedBindingShotRow, index: number) => {
           const cell = row.tags.find((c) => c.tagId === tag.tagId);
           if (!cell) return <Text type="secondary">—</Text>;
-          return <BindingCellView cell={cell} onClick={() => openCellModal(row, cell, index)} />;
+          const participation = computeParticipation(row.imagePrompt, row.tags).get(cell.tagId);
+          return (
+            <BindingCellView
+              cell={cell}
+              participation={participation}
+              onClick={() => openCellModal(row, cell, index)}
+            />
+          );
         },
       }),
     ),
@@ -318,13 +326,31 @@ export function MaterialStage() {
 
 /** ---------- 单元格：解析图缩略 + 来源徽标 ---------- */
 
+/** 参考位状态标注（与生成逻辑同一套规则，见 utils/ref-policy） */
+const PARTICIPATION_META: Record<string, { color: string; label: string; tip: string }> = {
+  ref: { color: 'success', label: '上参考', tip: '生成该镜头关键图时，这张图会作为参考图发给模型' },
+  'text-anchor': {
+    color: 'default',
+    label: '仅文字',
+    tip: '场景默认只做文字锚定不占参考位（防稀释角色形象）；提示词里写 @!场景名 可强制上参考',
+  },
+  unreferenced: {
+    color: 'warning',
+    label: '未引用',
+    tip: '该镜头提示词用 @ 指定了引用清单，但没有 @ 这个标签——需要的话在提示词里补 @标签名',
+  },
+};
+
 function BindingCellView({
   cell,
+  participation,
   onClick,
 }: {
   cell: ResolvedBindingCell;
+  participation?: string;
   onClick: () => void;
 }) {
+  const partMeta = participation ? PARTICIPATION_META[participation] : undefined;
   if (cell.resolved === null) {
     return (
       <div onClick={onClick} style={{ cursor: 'pointer' }} title="点击绑定">
@@ -368,11 +394,20 @@ function BindingCellView({
             display: 'block',
           }}
         />
-        <Tooltip title={meta.tip}>
-          <Tag color={meta.color} style={{ marginInlineEnd: 0 }}>
-            {meta.label}
-          </Tag>
-        </Tooltip>
+        <Space direction="vertical" size={2}>
+          <Tooltip title={meta.tip}>
+            <Tag color={meta.color} style={{ marginInlineEnd: 0 }}>
+              {meta.label}
+            </Tag>
+          </Tooltip>
+          {partMeta && (
+            <Tooltip title={partMeta.tip}>
+              <Tag color={partMeta.color} style={{ marginInlineEnd: 0 }}>
+                {partMeta.label}
+              </Tag>
+            </Tooltip>
+          )}
+        </Space>
       </Space>
     </div>
   );

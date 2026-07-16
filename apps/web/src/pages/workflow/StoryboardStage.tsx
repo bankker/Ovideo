@@ -26,6 +26,7 @@ import {
 import type { CapabilityEntry, StaleReason, TagType } from '@ovideo/shared';
 import { useApplyPatch, useStoryboards } from '../../api/workflow-hooks';
 import { useResolvedBindings, type ResolvedBindingCell } from '../../api/design-hooks';
+import { chooseRefCells } from '../../utils/ref-policy';
 import {
   useCapabilities,
   useClearStale,
@@ -238,28 +239,7 @@ export function StoryboardStage() {
  * 提示词含 @ 时由 @ 决定；否则角色/道具参考优先（场景不挤占参考位）。
  */
 function RefPreview({ shot, refCells }: { shot: ProduceShot; refCells: ResolvedBindingCell[] }) {
-  const mentions = [
-    ...(shot.imagePrompt || '').matchAll(/@(!?)([^\s@!，。；、,;.!？?！:：()（）【】[\]"'`]+)/g),
-  ].map((m) => ({ name: m[2], force: m[1] === '!' }));
-  let chosen: ResolvedBindingCell[];
-  let modeNote: string;
-  if (mentions.length > 0) {
-    // 与服务端一致：@角色/@道具 发参考图；@场景 仅锚定文字；@!场景 强制发
-    chosen = mentions
-      .map(({ name, force }) => {
-        const cell = refCells.find((c) => c.name === name);
-        if (!cell?.resolved) return null;
-        if (cell.type === 'SCENE' && !force) return null;
-        return cell;
-      })
-      .filter((c): c is ResolvedBindingCell => !!c);
-    modeNote = '由提示词中的 @ 指定（@场景 仅锚定文字，@!场景 才发参考图）';
-  } else {
-    const withRef = refCells.filter((c) => c.resolved);
-    const characters = withRef.filter((c) => c.type !== 'SCENE');
-    chosen = characters.length > 0 ? characters : withRef;
-    modeNote = '自动（角色设计图优先，场景图不占参考位，可用 @ 调整）';
-  }
+  const { chosen, modeNote } = chooseRefCells(shot.imagePrompt, refCells);
   if (chosen.length === 0) return null;
   return (
     <div style={{ marginBottom: 8 }}>

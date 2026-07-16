@@ -177,6 +177,8 @@ export const generationRoutes: FastifyPluginAsync<GenerationRoutesOptions> = asy
       shots: storyboard.shots.map((shot) => ({
         shotId: shot.id,
         sortOrder: shot.sortOrder,
+        // 前端据此计算每格的"参考位状态"（@ 提及/自动策略），与生成逻辑同一套规则
+        imagePrompt: shot.imagePrompt,
         tags: shot.tags.map((st): ResolvedBindingCell => {
           const cell = cellByKey.get(`${shot.id}:${st.tagId}`);
           const asset = cell?.assetId ? assetById.get(cell.assetId) : undefined;

@@ -80,6 +80,8 @@ export interface ResolvedBindingCell {
 export interface ResolvedBindingShotRow {
   shotId: string;
   sortOrder: number;
+  /** 镜头生图提示词——前端据此计算每格"参考位状态"（@ 提及/自动策略） */
+  imagePrompt: string;
   tags: ResolvedBindingCell[];
 }
 
