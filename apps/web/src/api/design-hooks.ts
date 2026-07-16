@@ -62,7 +62,8 @@ export interface DesignUploadResult {
 /** ---------- 素材页（resolved-bindings）实体 ---------- */
 
 /** 来源层级：shot = 镜头级覆盖；tag = 标签级默认 */
-export type BindingLevel = 'shot' | 'tag';
+/** shot=镜头级覆盖 > tag=标签级默认绑定 > design=默认设计图回落（未绑定时生成的实际取用） */
+export type BindingLevel = 'shot' | 'tag' | 'design';
 
 export interface ResolvedBindingCell {
   tagId: string;

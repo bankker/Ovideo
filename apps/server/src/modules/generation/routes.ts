@@ -33,7 +33,13 @@ export interface ResolvedBindingCell {
   tagId: string;
   name: string;
   type: string;
-  resolved: null | { assetId: string; uri: string; thumbUri: string | null; level: 'shot' | 'tag' };
+  resolved: null | {
+    assetId: string;
+    uri: string;
+    thumbUri: string | null;
+    /** shot=镜头级覆盖 > tag=标签级默认绑定 > design=默认设计图回落（与生成实际取用一致） */
+    level: 'shot' | 'tag' | 'design';
+  };
 }
 
 export const generationRoutes: FastifyPluginAsync<GenerationRoutesOptions> = async (app, opts) => {
@@ -131,8 +137,14 @@ export const generationRoutes: FastifyPluginAsync<GenerationRoutesOptions> = asy
     if (!storyboard) throw notFound('分镜');
     const episodeId = storyboard.episodeId;
 
-    // 先算每格的 (assetId, level)，再批量取资产补 uri/thumbUri
-    const cells: Array<{ shotId: string; tagId: string; assetId: string | null; level: 'shot' | 'tag' }> = [];
+    // 先算每格的 (assetId, level)，再批量取资产补 uri/thumbUri。
+    // 层级：镜头覆盖(shot) > 标签默认绑定(tag) > 默认设计图(design)——与关键图生成的实际取用逻辑一致
+    const cells: Array<{
+      shotId: string;
+      tagId: string;
+      assetId: string | null;
+      level: 'shot' | 'tag' | 'design';
+    }> = [];
     for (const shot of storyboard.shots) {
       for (const st of shot.tags) {
         const shotLevel = await db.binding.findUnique({
@@ -142,7 +154,17 @@ export const generationRoutes: FastifyPluginAsync<GenerationRoutesOptions> = asy
           cells.push({ shotId: shot.id, tagId: st.tagId, assetId: shotLevel.assetId, level: 'shot' });
         } else {
           const assetId = await resolveBinding(db, episodeId, st.tagId, shot.id);
-          cells.push({ shotId: shot.id, tagId: st.tagId, assetId, level: 'tag' });
+          if (assetId) {
+            cells.push({ shotId: shot.id, tagId: st.tagId, assetId, level: 'tag' });
+          } else {
+            // 未绑定 → 回落默认设计图（生成时的实际行为）
+            cells.push({
+              shotId: shot.id,
+              tagId: st.tagId,
+              assetId: st.tag.canonicalAssetId,
+              level: 'design',
+            });
+          }
         }
       }
     }

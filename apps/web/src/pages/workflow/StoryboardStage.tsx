@@ -13,6 +13,7 @@ import {
   Spin,
   Tag,
   Timeline,
+  Tooltip,
   Typography,
   message,
 } from 'antd';
@@ -24,6 +25,7 @@ import {
 } from '@ant-design/icons';
 import type { CapabilityEntry, StaleReason, TagType } from '@ovideo/shared';
 import { useApplyPatch, useStoryboards } from '../../api/workflow-hooks';
+import { useResolvedBindings, type ResolvedBindingCell } from '../../api/design-hooks';
 import {
   useCapabilities,
   useClearStale,
@@ -73,6 +75,14 @@ export function StoryboardStage() {
   const storyboardsQuery = useStoryboards(episodeId);
   const storyboards = storyboardsQuery.data;
   const [selectedStoryboardId, setSelectedStoryboardId] = useState<string | null>(null);
+
+  /* ---------- "将用参考"数据源（与素材页同一接口，含设计图回落层级） ---------- */
+  const resolvedQuery = useResolvedBindings(selectedStoryboardId);
+  const resolvedByShot = useMemo(() => {
+    const map = new Map<string, ResolvedBindingCell[]>();
+    for (const row of resolvedQuery.data?.shots ?? []) map.set(row.shotId, row.tags);
+    return map;
+  }, [resolvedQuery.data]);
 
   useEffect(() => {
     if (!storyboards || storyboards.length === 0) return;
@@ -211,6 +221,7 @@ export function StoryboardStage() {
               storyboardId={selectedStoryboardId ?? ''}
               imageModels={imageModels}
               patching={applyPatch.isPending}
+              refCells={resolvedByShot.get(shot.id) ?? []}
               onUpdateImagePrompt={handleUpdateImagePrompt}
             />
           ))
@@ -222,6 +233,53 @@ export function StoryboardStage() {
 
 /** ---------- 镜头卡片：左 关键图区（大图 + takes 抽卡横排） / 右 信息与操作 ---------- */
 
+/**
+ * "将用参考"预览：与服务端生成逻辑一致的前端镜像——
+ * 提示词含 @ 时由 @ 决定；否则角色/道具参考优先（场景不挤占参考位）。
+ */
+function RefPreview({ shot, refCells }: { shot: ProduceShot; refCells: ResolvedBindingCell[] }) {
+  const mentions = [...(shot.imagePrompt || '').matchAll(/@([^\s@，。；、,;.!？?！:：()（）【】[\]"'`]+)/g)].map(
+    (m) => m[1],
+  );
+  let chosen: ResolvedBindingCell[];
+  let modeNote: string;
+  if (mentions.length > 0) {
+    chosen = mentions
+      .map((name) => refCells.find((c) => c.name === name))
+      .filter((c): c is ResolvedBindingCell => !!c && !!c.resolved);
+    modeNote = '由提示词中的 @ 显式指定';
+  } else {
+    const withRef = refCells.filter((c) => c.resolved);
+    const characters = withRef.filter((c) => c.type !== 'SCENE');
+    chosen = characters.length > 0 ? characters : withRef;
+    modeNote = '自动（角色设计图优先，场景图不占参考位，可用 @ 调整）';
+  }
+  if (chosen.length === 0) return null;
+  return (
+    <div style={{ marginBottom: 8 }}>
+      <Tooltip title={modeNote}>
+        <Text type="secondary" style={{ fontSize: 12, marginRight: 6 }}>
+          将用参考：
+        </Text>
+      </Tooltip>
+      <Space size={4} wrap>
+        {chosen.map((c) => (
+          <Tooltip key={c.tagId} title={`${c.name}（点击缩略图可到素材页换绑）`}>
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+              <img
+                src={c.resolved!.thumbUri ?? c.resolved!.uri}
+                alt={c.name}
+                style={{ width: 20, height: 20, objectFit: 'cover', borderRadius: 3, border: '1px solid rgba(5,5,5,0.15)' }}
+              />
+              <Text style={{ fontSize: 12 }}>{c.name}</Text>
+            </span>
+          </Tooltip>
+        ))}
+      </Space>
+    </div>
+  );
+}
+
 function ShotKeyframeCard({
   shot,
   index,
@@ -229,6 +287,7 @@ function ShotKeyframeCard({
   storyboardId,
   imageModels,
   patching,
+  refCells,
   onUpdateImagePrompt,
 }: {
   shot: ProduceShot;
@@ -237,6 +296,7 @@ function ShotKeyframeCard({
   storyboardId: string;
   imageModels: CapabilityEntry[];
   patching: boolean;
+  refCells: ResolvedBindingCell[];
   onUpdateImagePrompt: (shotId: string, imagePrompt: string) => Promise<void>;
 }) {
   const qc = useQueryClient();
@@ -371,6 +431,8 @@ function ShotKeyframeCard({
               </Text>
             </div>
           )}
+
+          <RefPreview shot={shot} refCells={refCells} />
 
           <Paragraph
             type="secondary"

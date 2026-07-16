@@ -347,7 +347,12 @@ function BindingCellView({
       </div>
     );
   }
-  const isOverride = cell.resolved.level === 'shot';
+  const LEVEL_META: Record<string, { color: string; label: string; tip: string }> = {
+    shot: { color: 'orange', label: '覆盖', tip: '镜头级覆盖（优先于标签默认）' },
+    tag: { color: 'blue', label: '默认', tip: '来自标签级默认绑定' },
+    design: { color: 'green', label: '设计', tip: '未绑定，生成时自动使用该标签的默认设计图' },
+  };
+  const meta = LEVEL_META[cell.resolved.level] ?? LEVEL_META.tag;
   return (
     <div onClick={onClick} style={{ cursor: 'pointer' }} title="点击换绑">
       <Space size={6}>
@@ -363,9 +368,9 @@ function BindingCellView({
             display: 'block',
           }}
         />
-        <Tooltip title={isOverride ? '镜头级覆盖（优先于标签默认）' : '来自标签级默认绑定'}>
-          <Tag color={isOverride ? 'orange' : 'blue'} style={{ marginInlineEnd: 0 }}>
-            {isOverride ? '覆盖' : '默认'}
+        <Tooltip title={meta.tip}>
+          <Tag color={meta.color} style={{ marginInlineEnd: 0 }}>
+            {meta.label}
           </Tag>
         </Tooltip>
       </Space>
