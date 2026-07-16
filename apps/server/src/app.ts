@@ -34,6 +34,8 @@ import { enhanceRoutes } from './modules/enhance/routes.js';
 import { registerEnhanceExecutors } from './modules/enhance/executors.js';
 import { chatComplete } from './modules/provider/adapters/openai-compatible.js';
 import { openaiImageGenerate } from './modules/provider/adapters/openai-image.js';
+import { arkVideoGenerate } from './modules/provider/adapters/ark-video.js';
+import { uriToAbsPath } from './lib/storage.js';
 import { registerGenerationExecutors } from './modules/generation/executors.js';
 import { mockImageGen, mockVideoGen, mockTtsGen, type ImageGen, type VideoGen, type TtsGen } from './modules/generation/gens.js';
 import { registerCutExecutor } from './modules/cut/executor.js';
@@ -63,7 +65,23 @@ export function registerExecutors(): void {
   };
   const smartVideoGen: VideoGen = async (args) => {
     if (args.modelCfg?.baseUrl) {
-      throw new Error('该厂商的视频真实生成适配器将在 M3 接入（Seedance/海螺等），当前请使用 Mock 模型');
+      // 火山方舟（Seedance/wan2）走异步任务适配器；其余厂商待接入
+      const isArk =
+        args.modelCfg.baseUrl.includes('volces.com') || /seedance|wan2/i.test(args.modelCfg.modelKey);
+      if (!isArk) {
+        throw new Error('该厂商的视频真实生成适配器尚未接入（当前支持：火山方舟 Seedance），请选择 Seedance 或 Mock 模型');
+      }
+      await arkVideoGenerate(
+        { baseUrl: args.modelCfg.baseUrl, apiKey: args.modelCfg.apiKey, model: args.modelCfg.modelKey },
+        {
+          prompt: args.prompt,
+          firstFramePath: args.firstFrameUri ? uriToAbsPath(args.firstFrameUri) : null,
+          durationMs: args.durationMs,
+          outPath: args.outPath,
+          onProgress: args.onProgress,
+        },
+      );
+      return;
     }
     return mockVideoGen(args);
   };

@@ -252,6 +252,7 @@ function makeVideoExecutor(gens: GenerationGens): JobExecutor {
       durationMs,
       outPath: file.absPath,
       modelCfg,
+      onProgress: updateProgress,
     });
     await updateProgress(70);
 

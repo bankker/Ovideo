@@ -79,11 +79,11 @@ describe('PROVIDER_PRESETS 预置库结构完整性', () => {
     }
   });
 
-  it('火山方舟视频模型标注 M3 接入提示且 recommended=false', () => {
+  it('火山方舟视频模型（Seedance 适配器已接入）为推荐项并标注时长限制', () => {
     const ark = PROVIDER_PRESETS.find((p) => p.id === 'volcengine-ark')!;
-    const video = ark.models.find((m) => m.key === 'doubao-seedance-1-0-pro')!;
+    const video = ark.models.find((m) => m.key === 'doubao-seedance-1-0-pro-250528')!;
     expect(video.modality).toBe('video');
-    expect(video.recommended).toBe(false);
-    expect(video.note).toBe('视频适配器 M3 接入后可用');
+    expect(video.recommended).toBe(true);
+    expect(video.note).toContain('5s/10s');
   });
 });

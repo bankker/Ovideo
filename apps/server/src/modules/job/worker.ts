@@ -20,6 +20,21 @@ export function startWorker(db: PrismaClient, opts: WorkerOptions = {}): JobWork
   let ticking = false;
   const inflight = new Set<Promise<void>>();
 
+  // 启动恢复：进程重启（部署/热重载/崩溃）会遗留 RUNNING 孤儿任务——
+  // 标记为失败并说明原因；不自动重跑（真实生成可能已在厂商侧扣费，重跑会重复消耗），由用户点重试。
+  // 注意：必须在开始领取任务【之前】完成清扫（tick 等待此 promise），否则会误伤本 worker 刚领取的任务。
+  const recovery = db.job
+    .updateMany({
+      where: { status: 'RUNNING' },
+      data: { status: 'FAILED', error: '服务重启导致任务中断；如需继续请手动重试（真实生成可能已在厂商侧计费）', finishedAt: new Date() },
+    })
+    .then((r) => {
+      if (r.count > 0) console.warn(`[job-worker] 启动恢复：${r.count} 个中断任务已标记失败`);
+    })
+    .catch((err) => {
+      console.error('[job-worker] 启动恢复失败：', err);
+    });
+
   async function runJob(job: Job): Promise<void> {
     const executor = getExecutor(job.type as JobType);
     if (!executor) {
@@ -44,6 +59,7 @@ export function startWorker(db: PrismaClient, opts: WorkerOptions = {}): JobWork
     if (ticking || stopped) return;
     ticking = true;
     try {
+      await recovery; // 清扫完成前不领取任务
       while (!stopped && inflight.size < concurrency) {
         const job = await claimNextJob(db);
         if (!job) break;

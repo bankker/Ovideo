@@ -22,6 +22,8 @@ export type VideoGen = (args: {
   durationMs: number;
   outPath: string;
   modelCfg?: GenModelCfg;
+  /** 长耗时的真实视频生成用于回报任务进度（Mock 忽略） */
+  onProgress?: (percent: number) => Promise<void> | void;
 }) => Promise<void>;
 
 export type TtsGen = (args: {
