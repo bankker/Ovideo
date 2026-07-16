@@ -258,6 +258,7 @@ export function LibraryPage() {
                 </Descriptions.Item>
               )}
             </Descriptions>
+            <GenerationMeta metaJson={previewCurrent.metaJson} />
             <Space>
               <Button
                 icon={<NodeIndexOutlined />}
@@ -397,6 +398,41 @@ function AssetThumb({ asset }: { asset: AssetEntity }) {
 }
 
 /** 预览弹窗内的媒体主体 */
+/** 生成参数（生成透明度）：AI 产物展示实际生效的提示词与参考图清单，与镜头上存储的提示词区分 */
+function GenerationMeta({ metaJson }: { metaJson: string }) {
+  let meta: { effectivePrompt?: string; refImages?: string[] } = {};
+  try {
+    meta = JSON.parse(metaJson) as typeof meta;
+  } catch {
+    return null;
+  }
+  if (!meta.effectivePrompt && !(meta.refImages && meta.refImages.length > 0)) return null;
+  return (
+    <Descriptions
+      size="small"
+      column={1}
+      style={{ marginBottom: 12 }}
+      title={<Typography.Text style={{ fontSize: 13 }}>生成参数（实际发给模型的内容）</Typography.Text>}
+    >
+      {meta.refImages && meta.refImages.length > 0 && (
+        <Descriptions.Item label="参考图">
+          {meta.refImages.join('；')}
+        </Descriptions.Item>
+      )}
+      {meta.effectivePrompt && (
+        <Descriptions.Item label="生效提示词">
+          <Typography.Paragraph
+            style={{ fontSize: 12, marginBottom: 0, maxHeight: 120, overflow: 'auto' }}
+            copyable
+          >
+            {meta.effectivePrompt}
+          </Typography.Paragraph>
+        </Descriptions.Item>
+      )}
+    </Descriptions>
+  );
+}
+
 function AssetPreview({ asset }: { asset: AssetEntity }) {
   if (asset.type === 'IMAGE' || asset.type === 'FRAME') {
     return (

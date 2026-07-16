@@ -128,6 +128,8 @@ function makeKeyframeExecutor(gens: GenerationGens) {
       sizeBytes: fileSize(file.absPath),
       jobId: job.id,
       parentIds: boundAssetIds,
+      // 生成透明度：实际生效的完整提示词与参考图清单可查（区别于镜头上存储的 imagePrompt）
+      meta: { effectivePrompt: prompt.slice(0, 2000), refImages: refTagNotes },
     });
     // 图片缩略图直接复用原图 uri（createAsset 不收 thumbUri，落库后补写）
     await db.asset.update({ where: { id: asset.id }, data: { thumbUri: file.uri } });
