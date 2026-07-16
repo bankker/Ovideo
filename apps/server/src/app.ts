@@ -119,6 +119,18 @@ export async function buildApp(opts: BuildAppOptions = {}) {
 
   app.get('/api/health', async () => ({ ok: true, ts: Date.now() }));
 
+  // 浏览器直接访问 API 端口时给出中文引导，避免看到裸 404 JSON
+  app.get('/', async (_req, reply) => {
+    reply.type('text/html; charset=utf-8');
+    return `<!doctype html><meta charset="utf-8"><title>Ovideo API</title>
+<body style="font-family:system-ui;display:grid;place-items:center;height:100vh;margin:0;background:#f5f5f5">
+<div style="text-align:center;color:#333">
+<h2>这里是 Ovideo API 服务（端口 8787）</h2>
+<p>平台操作界面请访问 <a href="http://localhost:5173">http://localhost:5173</a></p>
+<p style="color:#999;font-size:13px">健康检查：<code>/api/health</code></p>
+</div></body>`;
+  });
+
   await app.register(projectRoutes, { db });
   await app.register(episodeRoutes, { db });
   await app.register(tagRoutes, { db });
