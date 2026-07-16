@@ -225,7 +225,7 @@ describe('GENERATE_IMAGE / kind=keyframe（假 Gen）', () => {
 });
 
 describe('GENERATE_IMAGE / kind=keyframe：@ 显式指定参考图', () => {
-  it('@标签名 → 参考图完全由 @ 决定（顺序=@顺序，可含场景图），@ 剥掉名字保留', async () => {
+  it('@ 分层语义：@角色 发参考图、@场景 仅锚定文字、@!场景 强制发（顺序=@顺序）', async () => {
     const { gens, imageCalls } = makeFakeGens();
     registerGenerationExecutors(gens);
     const exec = getExecutor('GENERATE_IMAGE')!;
@@ -243,24 +243,30 @@ describe('GENERATE_IMAGE / kind=keyframe：@ 显式指定参考图', () => {
     const tagOther = await db.tag.create({
       data: { projectId, type: 'CHARACTER', name: `路人乙-${crypto.randomUUID().slice(0, 6)}`, canonicalAssetId: assetOther.id },
     });
-    const { shot } = await seedShot({
+
+    // 场景 A：普通 @场景 —— 只锚定文字，参考图仅角色
+    const { shot: shotA } = await seedShot({
       imagePrompt: `@${tagScene.name} 上，@${tagHero.name} 迎风而立`,
       tags: { create: [{ tagId: tagOther.id }, { tagId: tagHero.id }] },
     });
-
-    const ctx = await makeCtx('GENERATE_IMAGE', { kind: 'keyframe', shotId: shot.id });
-    const r = await exec(ctx);
-
-    // 参考图 = @ 的两个标签（场景在前，尊重 @ 顺序），干扰标签未被携带
-    const asset = await db.asset.findUnique({ where: { id: (r.outputAssetIds ?? [])[0] } });
-    const parents = await parentIdsOf(asset!.id);
-    expect(parents).toEqual([assetHero.id, assetScene.id].sort());
-    expect(imageCalls[0]!.refUris).toEqual([assetScene.uri, assetHero.uri]);
+    const rA = await exec(await makeCtx('GENERATE_IMAGE', { kind: 'keyframe', shotId: shotA.id }));
+    expect(imageCalls[0]!.refUris).toEqual([assetHero.uri]); // 场景未入参考位，干扰标签未携带
+    const parentsA = await parentIdsOf((rA.outputAssetIds ?? [])[0]);
+    expect(parentsA).toEqual([assetHero.id]);
     // 提及处的 @ 剥掉、名字保留（一致性说明里的"@指定"标注不受影响）
     expect(imageCalls[0]!.prompt).not.toContain(`@${tagScene.name}`);
-    expect(imageCalls[0]!.prompt).not.toContain(`@${tagHero.name}`);
     expect(imageCalls[0]!.prompt).toContain(`${tagScene.name} 上，${tagHero.name} 迎风而立`);
     expect(imageCalls[0]!.prompt).toContain('@指定');
+
+    // 场景 B：@!场景 —— 强制入参考位，且尊重 @ 书写顺序（场景在前）
+    const { shot: shotB } = await seedShot({
+      imagePrompt: `@!${tagScene.name} 上，@${tagHero.name} 迎风而立`,
+      tags: { create: [{ tagId: tagHero.id }] },
+    });
+    await exec(await makeCtx('GENERATE_IMAGE', { kind: 'keyframe', shotId: shotB.id }));
+    expect(imageCalls[1]!.refUris).toEqual([assetScene.uri, assetHero.uri]);
+    expect(imageCalls[1]!.prompt).not.toContain('@!');
+    expect(imageCalls[1]!.prompt).toContain('强制');
   });
 
   it('@ 不存在的标签 → 明确报错；@ 无设计图的标签 → 明确报错', async () => {

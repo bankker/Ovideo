@@ -238,16 +238,22 @@ export function StoryboardStage() {
  * 提示词含 @ 时由 @ 决定；否则角色/道具参考优先（场景不挤占参考位）。
  */
 function RefPreview({ shot, refCells }: { shot: ProduceShot; refCells: ResolvedBindingCell[] }) {
-  const mentions = [...(shot.imagePrompt || '').matchAll(/@([^\s@，。；、,;.!？?！:：()（）【】[\]"'`]+)/g)].map(
-    (m) => m[1],
-  );
+  const mentions = [
+    ...(shot.imagePrompt || '').matchAll(/@(!?)([^\s@!，。；、,;.!？?！:：()（）【】[\]"'`]+)/g),
+  ].map((m) => ({ name: m[2], force: m[1] === '!' }));
   let chosen: ResolvedBindingCell[];
   let modeNote: string;
   if (mentions.length > 0) {
+    // 与服务端一致：@角色/@道具 发参考图；@场景 仅锚定文字；@!场景 强制发
     chosen = mentions
-      .map((name) => refCells.find((c) => c.name === name))
-      .filter((c): c is ResolvedBindingCell => !!c && !!c.resolved);
-    modeNote = '由提示词中的 @ 显式指定';
+      .map(({ name, force }) => {
+        const cell = refCells.find((c) => c.name === name);
+        if (!cell?.resolved) return null;
+        if (cell.type === 'SCENE' && !force) return null;
+        return cell;
+      })
+      .filter((c): c is ResolvedBindingCell => !!c);
+    modeNote = '由提示词中的 @ 指定（@场景 仅锚定文字，@!场景 才发参考图）';
   } else {
     const withRef = refCells.filter((c) => c.resolved);
     const characters = withRef.filter((c) => c.type !== 'SCENE');
@@ -455,7 +461,7 @@ function ShotKeyframeCard({
                 onChange={(e) => setEditingPrompt(e.target.value)}
               />
               <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 2 }}>
-                支持 @标签名 显式指定参考图（如 @小悟 @办公室）：只用被 @ 的设计图做参考；不写 @ 则自动使用本镜头角色的设计图
+                @标签名 引用：@角色/@道具 发参考图；@场景 仅锚定文字（防稀释角色形象）；@!场景 强制发参考图；不写 @ 则自动用本镜头角色设计图
               </Text>
               <Space style={{ marginTop: 4 }}>
                 <Button size="small" type="primary" loading={patching} onClick={() => void savePrompt()}>
