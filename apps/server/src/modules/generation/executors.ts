@@ -88,32 +88,43 @@ function makeKeyframeExecutor(gens: GenerationGens) {
     await updateProgress(10);
 
     // 【执行时】逐标签实时解析绑定（Bug6 防复发：任务排队期间换绑，这里拿到的是最新绑定）；
-    // 未绑定时回落到该标签的默认设计图（canonical）——设计好的角色/场景无需手动绑定即可参与生图
+    // 未绑定时回落到该标签的默认设计图（canonical）——设计好的角色/场景无需手动绑定即可参与生图。
+    // 【参考位策略】实测结论（Seedream 4.0 多参考注意力有限）：只送角色图时形象稳定，
+    // 掺入场景图会稀释角色特征（角色被"人化"）。因此角色/道具参考优先，
+    // 场景参考只在没有任何角色参考（纯空镜）时才送；场景观感交由文字提示词描述。
     const TAG_TYPE_LABEL: Record<string, string> = { CHARACTER: '角色', SCENE: '场景', PROP: '道具' };
-    const boundAssetIds: string[] = [];
-    const refTagNotes: string[] = [];
-    for (const shotTag of shot.tags) {
+    const TAG_TYPE_ORDER: Record<string, number> = { CHARACTER: 0, PROP: 1, SCENE: 2 };
+    const orderedTags = [...shot.tags].sort(
+      (a, b) => (TAG_TYPE_ORDER[a.tag.type] ?? 9) - (TAG_TYPE_ORDER[b.tag.type] ?? 9),
+    );
+    const resolved: Array<{ assetId: string; note: string; isScene: boolean }> = [];
+    for (const shotTag of orderedTags) {
       const assetId =
         (await resolveBinding(db, episodeId, shotTag.tagId, shot.id)) ??
         shotTag.tag.canonicalAssetId;
       if (assetId) {
-        boundAssetIds.push(assetId);
         // 标签描述（如"卡通小猴子"）一并写入——只有参考图而不点明形象时，模型容易画成默认人形
         const desc = shotTag.tag.description ? `，${shotTag.tag.description.slice(0, 60)}` : '';
-        refTagNotes.push(
-          `参考图${boundAssetIds.length}：${shotTag.tag.name}（${TAG_TYPE_LABEL[shotTag.tag.type] ?? shotTag.tag.type}${desc}）`,
-        );
+        resolved.push({
+          assetId,
+          note: `${shotTag.tag.name}（${TAG_TYPE_LABEL[shotTag.tag.type] ?? shotTag.tag.type}${desc}）`,
+          isScene: shotTag.tag.type === 'SCENE',
+        });
       }
     }
+    const characterRefs = resolved.filter((r) => !r.isScene);
+    const chosen = characterRefs.length > 0 ? characterRefs : resolved;
+    const boundAssetIds = chosen.map((r) => r.assetId);
+    const refTagNotes = chosen.map((r, i) => `参考图${i + 1}：${r.note}`);
     const boundAssets = await db.asset.findMany({ where: { id: { in: boundAssetIds } } });
     const byId = new Map(boundAssets.map((a) => [a.id, a]));
     const refUris = boundAssetIds.map((id) => byId.get(id)?.uri).filter((u): u is string => !!u);
 
-    // 有参考图时把"图-名"对应关系写进提示词，锁定角色/场景形象一致性
+    // 一致性说明放在提示词【开头】（模型对前部 token 权重更高），并硬性禁止角色人格化
     const basePrompt = shot.imagePrompt || shot.sourceText;
     const prompt =
       refTagNotes.length > 0
-        ? `${basePrompt}\n【形象一致性】${refTagNotes.join('；')}。画面中角色与场景的形象必须与对应参考图保持一致。`
+        ? `【形象一致性】${refTagNotes.join('；')}。角色的物种与形态严格按参考图，严禁把动物/机器人角色画成人类。\n${basePrompt}`
         : basePrompt;
     const file = allocFilePath(job.projectId, 'png');
     await gens.imageGen({ prompt, refUris, outPath: file.absPath, modelCfg });
