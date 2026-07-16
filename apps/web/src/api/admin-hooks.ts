@@ -176,9 +176,10 @@ export function useAutoConfigKey() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (apiKey: string) =>
+      // 注意：api() 内部会 JSON.stringify，这里必须传对象（传字符串会双重序列化导致服务端 400）
       api<AutoConfigKeyResult>('/admin/auto-config-key', {
         method: 'POST',
-        body: JSON.stringify({ apiKey }),
+        body: { apiKey },
       }),
     onSuccess: (r) => {
       if (r.matched) void qc.invalidateQueries({ queryKey: ['providers'] });
