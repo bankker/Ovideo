@@ -1,6 +1,7 @@
 // OpenAI 兼容图像生成适配器：POST /images/generations（b64_json → 直接落盘）。
 // 错误处理与超时风格同 openai-compatible.ts（AbortSignal.timeout，错误带状态码与响应片段）。
 import fs from 'node:fs';
+import path from 'node:path';
 
 export interface OpenAiImageConfig {
   baseUrl: string;
@@ -14,6 +15,20 @@ export interface OpenAiImageArgs {
   outPath: string;
   /** 缺省竖屏 1024x1792（平台统一 9:16 方向） */
   size?: string;
+  /**
+   * 参考图本地绝对路径（角色/场景一致性的关键）：以 base64 data URL 经 `image` 字段上送。
+   * 这是火山方舟 Seedream 等对 OpenAI images 协议的扩展；标准 OpenAI 端点会忽略未知字段。
+   * 最多取前 5 张（Ark 上限），空数组时不携带该字段。
+   */
+  refImagePaths?: string[];
+}
+
+const MAX_REF_IMAGES = 5;
+
+function toDataUrl(filePath: string): string {
+  const ext = path.extname(filePath).replace('.', '').toLowerCase() || 'png';
+  const mime = ext === 'jpg' ? 'jpeg' : ext;
+  return `data:image/${mime};base64,${fs.readFileSync(filePath).toString('base64')}`;
 }
 
 /** 图像生成默认超时 120s（比文本长：出图普遍慢） */
@@ -35,6 +50,9 @@ export async function openaiImageGenerate(
       prompt: args.prompt,
       size: args.size ?? '1024x1792',
       response_format: 'b64_json',
+      ...(args.refImagePaths && args.refImagePaths.length > 0
+        ? { image: args.refImagePaths.slice(0, MAX_REF_IMAGES).map(toDataUrl) }
+        : {}),
     }),
     signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
   });

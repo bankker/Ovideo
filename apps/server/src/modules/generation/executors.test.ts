@@ -110,7 +110,9 @@ describe('GENERATE_IMAGE / kind=keyframe（假 Gen）', () => {
     const ctx1 = await makeCtx('GENERATE_IMAGE', { kind: 'keyframe', shotId: shot.id });
     const r1 = await exec(ctx1);
     expect(imageCalls).toHaveLength(1);
-    expect(imageCalls[0]!.prompt).toBe('男主走进教室，阳光斜照');
+    // 有参考图时提示词附带"图-名"对应说明（形象一致性）
+    expect(imageCalls[0]!.prompt).toContain('男主走进教室，阳光斜照');
+    expect(imageCalls[0]!.prompt).toContain('【形象一致性】参考图1：');
     expect(imageCalls[0]!.refUris).toEqual([assetA.uri]);
     expect(imageCalls[0]!.modelCfg).toBeUndefined();
 

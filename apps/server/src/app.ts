@@ -57,7 +57,12 @@ export function registerExecutors(): void {
     if (args.modelCfg?.baseUrl) {
       await openaiImageGenerate(
         { baseUrl: args.modelCfg.baseUrl, apiKey: args.modelCfg.apiKey, model: args.modelCfg.modelKey },
-        { prompt: args.prompt, outPath: args.outPath },
+        {
+          prompt: args.prompt,
+          outPath: args.outPath,
+          // 绑定/默认设计图作为参考图上送（Seedream i2i），保证角色与场景形象一致
+          refImagePaths: args.refUris.map((u) => uriToAbsPath(u)),
+        },
       );
       return;
     }
