@@ -161,7 +161,8 @@ export async function buildApp(opts: BuildAppOptions = {}) {
 
   await app.register(projectRoutes, { db });
   await app.register(episodeRoutes, { db });
-  await app.register(tagRoutes, { db });
+  // dedupTextGen 前置声明依赖 chatTextGen（定义在下方）——用惰性包装避免声明顺序问题
+  await app.register(tagRoutes, { db, dedupTextGen: (prompt) => chatTextGen(prompt) });
   await app.register(assetRoutes, { db });
   await app.register(bindingRoutes, {
     db,

@@ -123,6 +123,51 @@ export function useProjectTags(projectId: string) {
   });
 }
 
+/** 疑似重复标签检测（LLM 语义判重，离线走启发式） */
+export interface DuplicateTagGroup {
+  type: string;
+  tags: Array<{ id: string; name: string }>;
+  suggestedName: string;
+}
+
+export function useCheckTagDuplicates(projectId: string) {
+  return useMutation({
+    mutationFn: () =>
+      api<{ groups: DuplicateTagGroup[]; method: 'llm' | 'heuristic' }>(
+        `/projects/${projectId}/tag-duplicates`,
+      ),
+  });
+}
+
+export function useMergeTags(projectId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ sourceTagId, targetTagId }: { sourceTagId: string; targetTagId: string }) =>
+      api(`/tags/${sourceTagId}/merge`, { method: 'POST', body: { targetTagId } }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['tags', projectId] });
+      void qc.invalidateQueries({ queryKey: ['designs'] });
+      void qc.invalidateQueries({ queryKey: ['resolved-bindings'] });
+      void qc.invalidateQueries({ queryKey: ['bindings'] });
+      void qc.invalidateQueries({ queryKey: ['storyboard'] });
+    },
+  });
+}
+
+/** 更新标签（重命名/改描述/设默认参考） */
+export function useUpdateTag(projectId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ tagId, ...body }: { tagId: string; name?: string; description?: string }) =>
+      api<TagEntity>(`/tags/${tagId}`, { method: 'PATCH', body }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['tags', projectId] });
+      void qc.invalidateQueries({ queryKey: ['resolved-bindings'] });
+      void qc.invalidateQueries({ queryKey: ['storyboard'] });
+    },
+  });
+}
+
 export function useCreateTag(projectId: string) {
   const qc = useQueryClient();
   return useMutation({

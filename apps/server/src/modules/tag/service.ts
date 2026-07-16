@@ -1,6 +1,7 @@
 import type { PrismaClient, Tag } from '@prisma/client';
 import type { TagType } from '@ovideo/shared';
 import { badRequest, conflict, notFound } from '../../lib/errors.js';
+import { rewritePromptMentions } from './merge.js';
 
 export async function listTags(db: PrismaClient, projectId: string): Promise<Tag[]> {
   return db.tag.findMany({ where: { projectId }, orderBy: { createdAt: 'asc' } });
@@ -37,7 +38,7 @@ export async function updateTag(
       throw badRequest('canonicalAssetId 对应的资产不存在或不属于该项目');
     }
   }
-  return db.tag.update({
+  const updated = await db.tag.update({
     where: { id },
     data: {
       ...(input.name !== undefined && { name: input.name }),
@@ -46,6 +47,11 @@ export async function updateTag(
       ...(input.canonicalAssetId !== undefined && { canonicalAssetId: input.canonicalAssetId }),
     },
   });
+  // 重命名时把提示词里的 @旧名 全部改写为 @新名（@ 是标识符引用，随名而动）
+  if (input.name !== undefined && input.name !== tag.name) {
+    await rewritePromptMentions(db, tag.projectId, tag.name, input.name);
+  }
+  return updated;
 }
 
 /**
