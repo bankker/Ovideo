@@ -79,7 +79,8 @@ export const EnqueueJobBodySchema = z.object({
 export const CreateProviderBodySchema = z.object({
   name: z.string().min(1).max(100),
   vendor: z.string().min(1).max(60),
-  category: ProviderCategorySchema,
+  /** 兼容保留：厂商不再按模态分家（一把 key 多模态通用），模态归属由旗下 ModelConfig.modality 决定 */
+  category: ProviderCategorySchema.default('TEXT'),
   baseUrl: z.string().default(''),
   apiKey: z.string().default(''),
   enabled: z.boolean().default(true),

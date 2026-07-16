@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import type { PrismaClient } from '@prisma/client';
 import { createTestDb, type TestDb } from '../../test/testdb.js';
@@ -23,6 +23,10 @@ beforeAll(async () => {
 afterAll(async () => {
   await app.close();
   await t.cleanup();
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
 });
 
 const textCapability = { modality: 'text', input: ['prompt'] };
@@ -219,20 +223,20 @@ describe('capabilities 路由', () => {
 });
 
 describe('连通测试路由', () => {
-  it('TEXT 且未配 baseUrl：MOCK 模式 ok', async () => {
+  it('未配 baseUrl：Mock 模式 ok（不区分厂商 category）', async () => {
     const p = (
       await app.inject({
         method: 'POST',
         url: '/api/admin/providers',
-        payload: { name: '测试路由厂', vendor: 'v', category: 'TEXT' },
+        payload: { name: '测试路由厂', vendor: 'v' },
       })
     ).json();
     const res = await app.inject({ method: 'POST', url: `/api/admin/providers/${p.id}/test` });
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual({ ok: true, message: 'MOCK 模式（未配置 baseUrl）' });
+    expect(res.json()).toEqual({ ok: true, message: 'Mock 模式（本地生成，无需外部连接）' });
   });
 
-  it('非 TEXT：ok=false', async () => {
+  it('category 为 IMAGE 也走同一逻辑（category 已是兼容字段）', async () => {
     const p = (
       await app.inject({
         method: 'POST',
@@ -242,11 +246,134 @@ describe('连通测试路由', () => {
     ).json();
     const res = await app.inject({ method: 'POST', url: `/api/admin/providers/${p.id}/test` });
     expect(res.statusCode).toBe(200);
-    expect(res.json().ok).toBe(false);
+    expect(res.json()).toEqual({ ok: true, message: 'Mock 模式（本地生成，无需外部连接）' });
+  });
+
+  it('配置 baseUrl 后 GET /models 成功：连通成功且带 latencyMs', async () => {
+    const p = (
+      await app.inject({
+        method: 'POST',
+        url: '/api/admin/providers',
+        payload: { name: '测试连通厂', vendor: 'v', baseUrl: 'https://llm.example.com', apiKey: 'sk-x' },
+      })
+    ).json();
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ data: [] }), { status: 200 })));
+    const res = await app.inject({ method: 'POST', url: `/api/admin/providers/${p.id}/test` });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().ok).toBe(true);
+    expect(res.json().message).toBe('连通成功');
+    expect(typeof res.json().latencyMs).toBe('number');
   });
 
   it('不存在的厂商返回 404', async () => {
     const res = await app.inject({ method: 'POST', url: '/api/admin/providers/nope/test' });
+    expect(res.statusCode).toBe(404);
+  });
+});
+
+describe('预置库 / 自动发现 / 批量导入路由', () => {
+  it('GET /api/admin/provider-presets：返回完整预置库', async () => {
+    const res = await app.inject({ method: 'GET', url: '/api/admin/provider-presets' });
+    expect(res.statusCode).toBe(200);
+    const { presets } = res.json();
+    expect(Array.isArray(presets)).toBe(true);
+    expect(presets.length).toBe(7);
+    const ark = presets.find((p: { id: string }) => p.id === 'volcengine-ark');
+    expect(ark.vendor).toBe('openai-compatible');
+    expect(ark.models.some((m: { recommended: boolean }) => m.recommended)).toBe(true);
+    expect(ark.models[0].capability).toMatchObject({ modality: 'text' });
+  });
+
+  it('POST discover-models：成功返回推断结果；未配 baseUrl/apiKey 返回 400', async () => {
+    const bare = (
+      await app.inject({
+        method: 'POST',
+        url: '/api/admin/providers',
+        payload: { name: '发现路由空厂', vendor: 'openai-compatible' },
+      })
+    ).json();
+    const r400 = await app.inject({ method: 'POST', url: `/api/admin/providers/${bare.id}/discover-models` });
+    expect(r400.statusCode).toBe(400);
+
+    const p = (
+      await app.inject({
+        method: 'POST',
+        url: '/api/admin/providers',
+        payload: { name: '发现路由厂', vendor: 'openai-compatible', baseUrl: 'https://ark.example.com/v3', apiKey: 'sk-d' },
+      })
+    ).json();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify({ data: [{ id: 'chat-a' }, { id: 'seedream-t2i' }] }), { status: 200 })),
+    );
+    const res = await app.inject({ method: 'POST', url: `/api/admin/providers/${p.id}/discover-models` });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().models).toEqual([
+      { key: 'chat-a', label: 'chat-a', modality: 'text', exists: false },
+      { key: 'seedream-t2i', label: 'seedream-t2i', modality: 'image', exists: false },
+    ]);
+  });
+
+  it('POST discover-models：上游失败返回 502', async () => {
+    const p = (
+      await app.inject({
+        method: 'POST',
+        url: '/api/admin/providers',
+        payload: { name: '发现路由坏厂', vendor: 'openai-compatible', baseUrl: 'https://down.example.com', apiKey: 'k' },
+      })
+    ).json();
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('ECONNREFUSED'); }));
+    const res = await app.inject({ method: 'POST', url: `/api/admin/providers/${p.id}/discover-models` });
+    expect(res.statusCode).toBe(502);
+    expect(res.json().error).toContain('无法获取模型列表');
+  });
+
+  it('POST models/batch：缺省 capability/label 补全，重复跳过；空数组返回 400', async () => {
+    const p = (
+      await app.inject({
+        method: 'POST',
+        url: '/api/admin/providers',
+        payload: { name: '批量路由厂', vendor: 'openai-compatible' },
+      })
+    ).json();
+
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/admin/providers/${p.id}/models/batch`,
+      payload: { models: [{ key: 'batch-a', modality: 'text' }, { key: 'seedream-x', modality: 'image' }] },
+    });
+    expect(res.statusCode).toBe(201);
+    expect(res.json()).toEqual({ created: 2, skipped: 0 });
+
+    // 重复导入：全部跳过
+    const again = await app.inject({
+      method: 'POST',
+      url: `/api/admin/providers/${p.id}/models/batch`,
+      payload: { models: [{ key: 'batch-a', modality: 'text' }] },
+    });
+    expect(again.statusCode).toBe(201);
+    expect(again.json()).toEqual({ created: 0, skipped: 1 });
+
+    const list = (await app.inject({ method: 'GET', url: `/api/admin/providers/${p.id}/models` })).json();
+    const img = list.find((m: { key: string }) => m.key === 'seedream-x');
+    expect(img.label).toBe('seedream-x');
+    expect(img.capability).toEqual({ modality: 'image', input: ['prompt', 'ref_images'] });
+    expect(img.enabled).toBe(true);
+
+    const empty = await app.inject({
+      method: 'POST',
+      url: `/api/admin/providers/${p.id}/models/batch`,
+      payload: { models: [] },
+    });
+    expect(empty.statusCode).toBe(400);
+  });
+
+  it('models/batch 不存在的厂商返回 404', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/admin/providers/nope/models/batch',
+      payload: { models: [{ key: 'k', modality: 'text' }] },
+    });
     expect(res.statusCode).toBe(404);
   });
 });

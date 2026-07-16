@@ -39,6 +39,8 @@ import { mockImageGen, mockVideoGen, mockTtsGen, type ImageGen, type VideoGen, t
 import { registerCutExecutor } from './modules/cut/executor.js';
 import { findOrCreateTags } from './modules/tag/service.js';
 import * as stale from './modules/stale/service.js';
+import { pickCandidates, pickModelForModality, AUTO_ROUTE_MODALITIES } from './modules/provider/scheduler.js';
+import type { Modality } from '@ovideo/shared';
 
 /**
  * 集成装配：模块间协作全部在这里接线（模块彼此不 import，见各模块 options 注释）。
@@ -145,32 +147,56 @@ export async function buildApp(opts: BuildAppOptions = {}) {
   });
   await app.register(jobRoutes, { db });
   await app.register(providerRoutes, { db });
-  // 对话式剧本：请求时动态选第一个 enabled 的真实 TEXT 模型（有 baseUrl），无则走确定性 Mock
-  const chatTextGen = async (prompt: string): Promise<string> => {
-    const model = await db.modelConfig.findFirst({
-      where: { enabled: true, modality: 'text', provider: { enabled: true, category: 'TEXT', NOT: { baseUrl: '' } } },
-      include: { provider: true },
-      orderBy: { sortOrder: 'asc' },
-    });
-    if (model) {
-      return chatComplete(
-        { baseUrl: model.provider.baseUrl, apiKey: model.provider.apiKey, model: model.key },
-        [{ role: 'user', content: prompt }],
-        { jsonMode: true },
-      );
+  // 按需调度（v3.6）：任务未显式指定模型时，按 JobType 对应模态自动选用队首的已启用真实模型；
+  // 无真实模型则回落 Mock。只覆盖已有真实适配器的模态（text/image），video/tts 待 M3 适配器。
+  const MODALITY_BY_JOB_TYPE: Record<string, Modality> = {
+    GENERATE_STORYBOARD: 'text',
+    GENERATE_IMAGE: 'image',
+    GENERATE_VIDEO: 'video',
+    GENERATE_TTS: 'tts',
+  };
+  const enqueue = async (input: Parameters<typeof enqueueJob>[1]) => {
+    const payload = (input.inputPayload ?? {}) as Record<string, unknown>;
+    const modality = MODALITY_BY_JOB_TYPE[input.type];
+    if (!payload.modelConfigId && modality && AUTO_ROUTE_MODALITIES.includes(modality)) {
+      const picked = await pickModelForModality(db, modality);
+      if (picked) {
+        return enqueueJob(db, {
+          ...input,
+          executor: 'API',
+          inputPayload: { ...payload, modelConfigId: picked.id },
+          providerConfigId: picked.providerConfigId,
+          modelKey: picked.key,
+        });
+      }
     }
-    return mockChatGen(prompt);
+    return enqueueJob(db, input);
+  };
+
+  // 对话式剧本：按需调度 + 失效转移——依次尝试文本模态候选队列，全部失败才报错；
+  // 无任何真实候选时走确定性 Mock（离线可用）。
+  const chatTextGen = async (prompt: string): Promise<string> => {
+    const candidates = await pickCandidates(db, 'text');
+    if (candidates.length === 0) return mockChatGen(prompt);
+    const failures: string[] = [];
+    for (const model of candidates) {
+      try {
+        return await chatComplete(
+          { baseUrl: model.provider.baseUrl, apiKey: model.provider.apiKey, model: model.key },
+          [{ role: 'user', content: prompt }],
+          { jsonMode: true },
+        );
+      } catch (err) {
+        failures.push(`${model.key}: ${err instanceof Error ? err.message.slice(0, 120) : '未知错误'}`);
+      }
+    }
+    // 底线：真实模型全部失败时不静默降级 Mock，明确报错
+    throw new Error(`全部 ${candidates.length} 个文本模型调用失败——${failures.join('；')}`);
   };
 
   await app.register(scriptRoutes, {
     db,
-    enqueue: (input) =>
-      enqueueJob(db, {
-        projectId: input.projectId,
-        type: input.type,
-        executor: input.executor,
-        inputPayload: input.inputPayload,
-      }),
+    enqueue, // 统一走按需调度入队（未指定模型时自动选队首真实模型）
     hooks: { onScriptDraftChanged: stale.onScriptDraftChanged },
     chat: createScriptChat({ textGen: chatTextGen }),
   });
@@ -181,7 +207,6 @@ export async function buildApp(opts: BuildAppOptions = {}) {
   });
 
   // ---- M2 生成管线路由 ----
-  const enqueue = (input: Parameters<typeof enqueueJob>[1]) => enqueueJob(db, input);
   await app.register(designRoutes, { db, enqueue });
   await app.register(dubbingRoutes, { db, enqueue });
   await app.register(generationRoutes, { db, enqueue });
