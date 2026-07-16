@@ -86,8 +86,7 @@ describe('chatComplete', () => {
       ),
     );
 
-    const err: unknown = await chatComplete(cfg, messages, { timeoutMs: 30 }).catch((e) => e);
-    expect(err).toBeDefined();
-    expect((err as { name?: string }).name).toBe('TimeoutError');
+    // 超时被翻译为可行动的中文提示（含主机名），不再裸抛 TimeoutError
+    await expect(chatComplete(cfg, messages, { timeoutMs: 30 })).rejects.toThrow(/请求超时：.+无响应/);
   });
 });

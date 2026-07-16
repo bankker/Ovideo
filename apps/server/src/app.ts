@@ -39,7 +39,7 @@ import { mockImageGen, mockVideoGen, mockTtsGen, type ImageGen, type VideoGen, t
 import { registerCutExecutor } from './modules/cut/executor.js';
 import { findOrCreateTags } from './modules/tag/service.js';
 import * as stale from './modules/stale/service.js';
-import { pickCandidates, pickModelForModality, AUTO_ROUTE_MODALITIES } from './modules/provider/scheduler.js';
+import { createFailoverTextGen, pickModelForModality, AUTO_ROUTE_MODALITIES } from './modules/provider/scheduler.js';
 import type { Modality } from '@ovideo/shared';
 
 /**
@@ -82,7 +82,9 @@ export function registerExecutors(): void {
       ctx.job.inputJson,
       {},
     );
-    let textGen = mockTextGen;
+    // 用户显式指定模型 → 只用该模型（失败即失败，不偷换）；
+    // 未指定 → 按需调度 + 失效转移（候选依次尝试，全无候选回落确定性 Mock）
+    let textGen = createFailoverTextGen(ctx.db, mockTextGen);
     if (input.modelConfigId) {
       const model = await ctx.db.modelConfig.findUnique({
         where: { id: input.modelConfigId },
@@ -99,8 +101,9 @@ export function registerExecutors(): void {
         };
         textGen = async (prompt: string) =>
           chatComplete(cfg, [{ role: 'user', content: prompt }], { jsonMode: true });
+      } else {
+        textGen = mockTextGen; // 显式选择 Mock 厂商
       }
-      // baseUrl 为空的"Mock 厂商"走 mockTextGen
     }
     return createStoryboardGenerator({ textGen })(ctx);
   });
@@ -161,6 +164,16 @@ export async function buildApp(opts: BuildAppOptions = {}) {
     if (!payload.modelConfigId && modality && AUTO_ROUTE_MODALITIES.includes(modality)) {
       const picked = await pickModelForModality(db, modality);
       if (picked) {
+        // 文本任务不钉死单一模型：执行时走失效转移（见 GENERATE_STORYBOARD 执行器），
+        // modelKey 仅作展示；图像任务钉队首模型（图像适配器暂无转移链）
+        if (input.type === 'GENERATE_STORYBOARD') {
+          return enqueueJob(db, {
+            ...input,
+            executor: 'API',
+            providerConfigId: picked.providerConfigId,
+            modelKey: `自动调度（首选 ${picked.key}）`,
+          });
+        }
         return enqueueJob(db, {
           ...input,
           executor: 'API',
@@ -173,26 +186,8 @@ export async function buildApp(opts: BuildAppOptions = {}) {
     return enqueueJob(db, input);
   };
 
-  // 对话式剧本：按需调度 + 失效转移——依次尝试文本模态候选队列，全部失败才报错；
-  // 无任何真实候选时走确定性 Mock（离线可用）。
-  const chatTextGen = async (prompt: string): Promise<string> => {
-    const candidates = await pickCandidates(db, 'text');
-    if (candidates.length === 0) return mockChatGen(prompt);
-    const failures: string[] = [];
-    for (const model of candidates) {
-      try {
-        return await chatComplete(
-          { baseUrl: model.provider.baseUrl, apiKey: model.provider.apiKey, model: model.key },
-          [{ role: 'user', content: prompt }],
-          { jsonMode: true },
-        );
-      } catch (err) {
-        failures.push(`${model.key}: ${err instanceof Error ? err.message.slice(0, 120) : '未知错误'}`);
-      }
-    }
-    // 底线：真实模型全部失败时不静默降级 Mock，明确报错
-    throw new Error(`全部 ${candidates.length} 个文本模型调用失败——${failures.join('；')}`);
-  };
+  // 对话式剧本：按需调度 + 失效转移（与三步生成任务共用 scheduler 的同一策略）
+  const chatTextGen = createFailoverTextGen(db, mockChatGen);
 
   await app.register(scriptRoutes, {
     db,

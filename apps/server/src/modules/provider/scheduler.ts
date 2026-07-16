@@ -5,6 +5,7 @@ import type { Modality } from '@ovideo/shared';
 import { badRequest } from '../../lib/errors.js';
 import { PROVIDER_PRESETS, type ProviderPreset } from './presets.js';
 import { batchCreateModels, testProvider, type ProviderTestResult } from './service.js';
+import { chatComplete } from './adapters/openai-compatible.js';
 
 export type ModelWithProvider = ModelConfig & { provider: ProviderConfig };
 
@@ -27,6 +28,34 @@ export async function pickCandidates(db: PrismaClient, modality: Modality): Prom
 export async function pickModelForModality(db: PrismaClient, modality: Modality): Promise<ModelWithProvider | null> {
   const list = await pickCandidates(db, modality);
   return list[0] ?? null;
+}
+
+/**
+ * 带失效转移的文本生成：依次尝试文本模态候选队列（某家网络不通/报错自动换下一家），
+ * 全部失败才抛错（不静默降级）；一个真实候选都没有时走 fallback（确定性 Mock，离线可用）。
+ * 对话式修改与三步生成任务共用此策略。
+ */
+export function createFailoverTextGen(
+  db: PrismaClient,
+  fallback: (prompt: string) => Promise<string>,
+): (prompt: string) => Promise<string> {
+  return async (prompt: string) => {
+    const candidates = await pickCandidates(db, 'text');
+    if (candidates.length === 0) return fallback(prompt);
+    const failures: string[] = [];
+    for (const model of candidates) {
+      try {
+        return await chatComplete(
+          { baseUrl: model.provider.baseUrl, apiKey: model.provider.apiKey, model: model.key },
+          [{ role: 'user', content: prompt }],
+          { jsonMode: true },
+        );
+      } catch (err) {
+        failures.push(`${model.key}: ${err instanceof Error ? err.message.slice(0, 140) : '未知错误'}`);
+      }
+    }
+    throw new Error(`全部 ${candidates.length} 个文本模型调用失败——${failures.join('；')}`);
+  };
 }
 
 /* ---------------- 贴 key 一键接入 ---------------- */

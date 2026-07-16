@@ -1,7 +1,13 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createTestDb, type TestDb } from '../../test/testdb.js';
 import { PROVIDER_PRESETS } from './presets.js';
-import { autoConfigureKey, pickCandidates, pickModelForModality, AUTO_ROUTE_MODALITIES } from './scheduler.js';
+import {
+  autoConfigureKey,
+  createFailoverTextGen,
+  pickCandidates,
+  pickModelForModality,
+  AUTO_ROUTE_MODALITIES,
+} from './scheduler.js';
 
 let tdb: TestDb;
 
@@ -51,6 +57,55 @@ describe('按需调度：候选队列', () => {
 
   it('自动调度模态白名单只含已有真实适配器的 text/image', () => {
     expect(AUTO_ROUTE_MODALITIES).toEqual(['text', 'image']);
+  });
+});
+
+describe('失效转移文本生成', () => {
+  const seedTwoProviders = async () => {
+    const db = tdb.db;
+    const p1 = await db.providerConfig.create({
+      data: { name: '一号（会挂）', vendor: 'openai-compatible', category: 'TEXT', baseUrl: 'https://down.example', apiKey: 'k1', enabled: true },
+    });
+    const p2 = await db.providerConfig.create({
+      data: { name: '二号（正常）', vendor: 'openai-compatible', category: 'TEXT', baseUrl: 'https://up.example', apiKey: 'k2', enabled: true },
+    });
+    await db.modelConfig.create({
+      data: { providerConfigId: p1.id, key: 'model-down', label: 'D', modality: 'text', capabilityJson: '{}', enabled: true, sortOrder: 0 },
+    });
+    await db.modelConfig.create({
+      data: { providerConfigId: p2.id, key: 'model-up', label: 'U', modality: 'text', capabilityJson: '{}', enabled: true, sortOrder: 1 },
+    });
+  };
+  const cleanup = async () => {
+    await tdb.db.modelConfig.deleteMany({});
+    await tdb.db.providerConfig.deleteMany({});
+  };
+
+  it('队首网络不通 → 自动切换下一家成功（本次故障场景的回归测试）', async () => {
+    await seedTwoProviders();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string | URL) => {
+        if (String(url).startsWith('https://down.example')) throw new TypeError('fetch failed');
+        return new Response(JSON.stringify({ choices: [{ message: { content: '{"ok":true}' } }] }), { status: 200 });
+      }),
+    );
+    const gen = createFailoverTextGen(tdb.db, async () => 'mock');
+    await expect(gen('测试')).resolves.toBe('{"ok":true}');
+    await cleanup();
+  });
+
+  it('全部候选失败 → 明确报错且不静默降级 Mock', async () => {
+    await seedTwoProviders();
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new TypeError('fetch failed'); }));
+    const gen = createFailoverTextGen(tdb.db, async () => 'mock');
+    await expect(gen('测试')).rejects.toThrow(/全部 2 个文本模型调用失败/);
+    await cleanup();
+  });
+
+  it('无任何真实候选 → 回落 fallback（离线 Mock）', async () => {
+    const gen = createFailoverTextGen(tdb.db, async () => 'mock-result');
+    await expect(gen('测试')).resolves.toBe('mock-result');
   });
 });
 
