@@ -49,6 +49,7 @@ import {
   type ShotDetail,
   type StoryboardDetail,
 } from '../../api/workflow-hooks';
+import { TagDedup } from '../../components/TagDedup';
 import { useScriptChat } from '../../api/chat-hooks';
 
 const { Text, Paragraph } = Typography;
@@ -69,8 +70,10 @@ const EMPTY_NEW_SHOT = {
 
 /** 剧本阶段（M1 三步生成表单流）：左 剧本稿列表 / 中 内容编辑 / 右 分镜结果 */
 export function ScriptStage() {
-  const { episodeId = '' } = useParams();
+  const { projectId = '', episodeId = '' } = useParams();
   const qc = useQueryClient();
+  /** 三步生成成功后 +1 → 触发一次静默的重复标签检查（发现拆裂标签立刻提醒） */
+  const [dedupSignal, setDedupSignal] = useState(0);
 
   /* ---------- 剧本稿 ---------- */
   const draftsQuery = useScriptDrafts(episodeId);
@@ -167,6 +170,7 @@ export function ScriptStage() {
       pendingSelectLatestRef.current = true;
       void qc.invalidateQueries({ queryKey: ['storyboards', episodeId] });
       setRunningJobId(null);
+      setDedupSignal((s) => s + 1); // 生成产生了新标签 → 静默判重
     } else if (job.status === 'FAILED') {
       message.error(job.error ?? '分镜生成失败');
       setRunningJobId(null);
@@ -406,6 +410,8 @@ export function ScriptStage() {
           </Space>
         }
       >
+        {/* 生成成功后静默判重：发现拆裂标签才显示横幅（干净时零打扰） */}
+        <TagDedup projectId={projectId} showButton={false} autoCheckSignal={dedupSignal} />
         {selectedDraft === null ? (
           <Empty description="请先在左侧选择或新建剧本稿" style={{ marginTop: 80 }} />
         ) : (

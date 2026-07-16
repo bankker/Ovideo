@@ -164,6 +164,9 @@ export function useJob(jobId: string | null) {
       const status = query.state.data?.status;
       return isJobFinished(status) ? false : 1500;
     },
+    // 任务可能长达数分钟（视频生成），用户切走标签页也要继续跟进，
+    // 回来时才有完成态和后续联动（自动选中新版本、重复标签检查等）
+    refetchIntervalInBackground: true,
   });
 }
 

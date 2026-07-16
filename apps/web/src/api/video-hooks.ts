@@ -151,6 +151,8 @@ export function useGenJob(jobId: string | null, intervalMs = 2000) {
     enabled: jobId !== null,
     refetchInterval: (query) =>
       isGenJobFinished(query.state.data?.status) ? false : intervalMs,
+    // 视频生成动辄数分钟，后台标签页也持续跟进
+    refetchIntervalInBackground: true,
   });
 }
 

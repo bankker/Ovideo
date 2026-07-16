@@ -9,12 +9,10 @@ import {
   Input,
   Modal,
   Popconfirm,
-  Radio,
   Segmented,
   Select,
   Space,
   Spin,
-  Tag,
   Tooltip,
   Typography,
   Upload,
@@ -22,26 +20,22 @@ import {
 } from 'antd';
 import {
   DeleteOutlined,
-  MergeCellsOutlined,
   PlusOutlined,
   ThunderboltOutlined,
   UploadOutlined,
 } from '@ant-design/icons';
 import type { CapabilityEntry, TagType } from '@ovideo/shared';
 import { useJob } from '../../api/workflow-hooks';
+import { TagDedup } from '../../components/TagDedup';
 import {
   useCapabilities,
-  useCheckTagDuplicates,
   useCreateTag,
   useGenerateDesign,
-  useMergeTags,
   useProjectTags,
   useRemoveDesign,
   useSetCanonical,
   useTagDesigns,
-  useUpdateTag,
   useUploadDesign,
-  type DuplicateTagGroup,
   type TagEntity,
 } from '../../api/design-hooks';
 
@@ -56,107 +50,6 @@ const TAG_TYPE_LABEL: Record<TagType, string> = {
 const GOLD = '#faad14';
 
 /** 设计阶段：项目级标签（角色/场景/道具）的候选设计图工作台 */
-/**
- * 重复标签检查器：LLM 语义判重（「同一办公室」≈「办公室」这类拆裂提前抓出来），
- * 每组选一个保留目标，其余合并过去并重命名为建议短名。
- */
-function DedupChecker({ projectId }: { projectId: string }) {
-  const check = useCheckTagDuplicates(projectId);
-  const merge = useMergeTags(projectId);
-  const updateTag = useUpdateTag(projectId);
-  const [open, setOpen] = useState(false);
-  const [groups, setGroups] = useState<DuplicateTagGroup[]>([]);
-  const [targets, setTargets] = useState<Record<number, string>>({});
-  const [merging, setMerging] = useState(false);
-
-  const runCheck = () => {
-    check.mutate(undefined, {
-      onSuccess: (r) => {
-        if (r.groups.length === 0) {
-          message.success('未发现疑似重复标签');
-          return;
-        }
-        setGroups(r.groups);
-        setTargets(Object.fromEntries(r.groups.map((g, i) => [i, g.tags[0].id])));
-        setOpen(true);
-      },
-      onError: (e) => message.error(e.message),
-    });
-  };
-
-  const runMerge = async (gi: number) => {
-    const group = groups[gi];
-    const targetId = targets[gi];
-    setMerging(true);
-    try {
-      for (const t of group.tags) {
-        if (t.id !== targetId) {
-          await merge.mutateAsync({ sourceTagId: t.id, targetTagId: targetId });
-        }
-      }
-      if (group.suggestedName) {
-        await updateTag.mutateAsync({ tagId: targetId, name: group.suggestedName });
-      }
-      message.success(`已合并 ${group.tags.length} 个标签 → 「${group.suggestedName}」`);
-      const rest = groups.filter((_, i) => i !== gi);
-      setGroups(rest);
-      if (rest.length === 0) setOpen(false);
-    } catch (e) {
-      message.error(e instanceof Error ? e.message : '合并失败');
-    } finally {
-      setMerging(false);
-    }
-  };
-
-  return (
-    <>
-      <Button icon={<MergeCellsOutlined />} loading={check.isPending} onClick={runCheck}>
-        检查重复标签
-      </Button>
-      <Modal
-        open={open}
-        title="疑似重复标签（指同一实体，建议合并）"
-        footer={null}
-        onCancel={() => setOpen(false)}
-        width={560}
-      >
-        <Space direction="vertical" size={16} style={{ width: '100%' }}>
-          {groups.map((g, gi) => (
-            <div key={gi} style={{ border: '1px solid rgba(5,5,5,0.1)', borderRadius: 8, padding: 12 }}>
-              <Space direction="vertical" size={8} style={{ width: '100%' }}>
-                <Space wrap>
-                  <Tag color="blue">{TAG_TYPE_LABEL[g.type as TagType] ?? g.type}</Tag>
-                  <span>
-                    合并后名称：<b>{g.suggestedName}</b>
-                  </span>
-                </Space>
-                <Radio.Group
-                  value={targets[gi]}
-                  onChange={(e) => setTargets((prev) => ({ ...prev, [gi]: e.target.value as string }))}
-                >
-                  <Space direction="vertical" size={4}>
-                    {g.tags.map((t) => (
-                      <Radio key={t.id} value={t.id}>
-                        {t.name}
-                        <span style={{ color: '#999', fontSize: 12 }}>
-                          {targets[gi] === t.id ? '（保留此标签，其余合并进来）' : ''}
-                        </span>
-                      </Radio>
-                    ))}
-                  </Space>
-                </Radio.Group>
-                <Button type="primary" size="small" loading={merging} onClick={() => void runMerge(gi)}>
-                  合并这一组
-                </Button>
-              </Space>
-            </div>
-          ))}
-        </Space>
-      </Modal>
-    </>
-  );
-}
-
 export function DesignStage() {
   const { projectId = '' } = useParams();
 
@@ -215,7 +108,7 @@ export function DesignStage() {
         >
           新建标签
         </Button>
-        <DedupChecker projectId={projectId} />
+        <TagDedup projectId={projectId} />
       </Space>
 
       {tagsQuery.isLoading ? (
