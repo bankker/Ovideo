@@ -327,25 +327,136 @@ async function extractPrevSegmentTailFrame(
 }
 
 /**
- * 口パク（动画式对口型）：镜头里有具名说话人时返回其标签名列表（旁白不驱动口型；去重保序）。
- * 视频提示词据此注入"正在说话，嘴部自然开合"——动画对口型只需响度级张闭循环，
- * 时长链（视频长度≈配音长度）保证说话时段大致对齐。
+ * 口型时间轴常量：必须与合成阶段（cut/executor.ts）逐字一致，否则提示的说话时段会整体漂移。
+ * HEAD_PAD 让台词不顶着切镜开口，LINE_GAP 是行间静音，TAIL_PAD 让尾句说完再切镜。
  */
-export async function listSpeakerNames(db: PrismaClient, shotId: string): Promise<string[]> {
-  const lines = await db.dialogueLine.findMany({
-    where: { shotId, isNarrator: false, speakerTagId: { not: null } },
-    orderBy: { sortOrder: 'asc' },
-  });
+const LIP_HEAD_PAD_MS = 200;
+const LIP_LINE_GAP_MS = 300; // = DUBBING_GAP_MS（本文件下方声明，此处不能前向引用）
+const LIP_TAIL_PAD_MS = 500;
+
+/** 时间轴上的一行：具名说话人名（旁白/无标签为 null）+ 已就绪的配音时长（未就绪为 null） */
+interface LipSyncLine {
+  speaker: string | null;
+  durationMs: number | null;
+}
+
+/** 合并后的说话时段（同一说话人的连续行并成一段，中间的行间间隔并入该段） */
+interface LipSyncSegment {
+  speaker: string;
+  startMs: number | null;
+  endMs: number | null;
+}
+
+const secs = (ms: number): string => (ms / 1000).toFixed(1);
+const at = (name: string): string => `@${name}`;
+
+/** 读取镜头台词行 + 各行已就绪的配音时长（旁白行同样占时间轴，必须纳入偏移计算） */
+async function loadLipSyncLines(db: PrismaClient, shotId: string): Promise<LipSyncLine[]> {
+  const lines = await db.dialogueLine.findMany({ where: { shotId }, orderBy: { sortOrder: 'asc' } });
   if (lines.length === 0) return [];
-  const tagIds = [...new Set(lines.map((l) => l.speakerTagId!))];
-  const tags = await db.tag.findMany({ where: { id: { in: tagIds } } });
-  const nameById = new Map(tags.map((t) => [t.id, t.name]));
-  const names: string[] = [];
-  for (const l of lines) {
-    const name = nameById.get(l.speakerTagId!);
-    if (name !== undefined && !names.includes(name)) names.push(name);
+
+  const dubs = await db.dubbingLine.findMany({ where: { shotId }, orderBy: { createdAt: 'asc' } });
+  const readyMsByLineId = new Map<string, number>();
+  for (const d of dubs) {
+    // 重生成会留下多条行记录，后写入的 READY 行代表当前音轨
+    if (d.dialogueLineId && d.status === 'READY' && d.durationMs != null) {
+      readyMsByLineId.set(d.dialogueLineId, d.durationMs);
+    }
   }
-  return names;
+
+  const tagIds = [...new Set(lines.filter((l) => l.speakerTagId).map((l) => l.speakerTagId!))];
+  const tags = tagIds.length > 0 ? await db.tag.findMany({ where: { id: { in: tagIds } } }) : [];
+  const nameById = new Map(tags.map((t) => [t.id, t.name]));
+
+  return lines.map((l) => ({
+    speaker: l.isNarrator || !l.speakerTagId ? null : (nameById.get(l.speakerTagId) ?? null),
+    durationMs: readyMsByLineId.get(l.id) ?? null,
+  }));
+}
+
+/**
+ * 按时间轴把台词行折成说话时段：
+ * 第 k 行起点 = HEAD_PAD + Σ(前 k-1 行时长) + LINE_GAP×(k-1)（与合成阶段同口径）。
+ * 旁白行不产生时段但会打断合并（旁白期间角色应闭嘴）。任一行缺就绪时长则时间未知（startMs/endMs 为 null）。
+ */
+function toLipSyncSegments(lines: LipSyncLine[]): LipSyncSegment[] {
+  const timed = lines.every((l) => l.durationMs != null);
+  const segments: LipSyncSegment[] = [];
+  let cursor = LIP_HEAD_PAD_MS;
+  let prevSpeaker: string | null = null;
+
+  for (const line of lines) {
+    const startMs = timed ? cursor : null;
+    const endMs = timed ? cursor + line.durationMs! : null;
+    if (line.speaker !== null) {
+      const last = segments[segments.length - 1];
+      if (last && prevSpeaker === line.speaker) {
+        last.endMs = endMs; // 同一说话人连续行 → 并入上一段（中间 300ms 间隔一并吞掉）
+      } else {
+        segments.push({ speaker: line.speaker, startMs, endMs });
+      }
+    }
+    prevSpeaker = line.speaker;
+    if (timed) cursor = endMs! + LIP_LINE_GAP_MS;
+  }
+  return segments;
+}
+
+/** 时间轴总长（含头尾留白）；任一行缺就绪时长则返回 null */
+function lipSyncTimelineMs(lines: LipSyncLine[]): number | null {
+  if (lines.length === 0) return null;
+  let total = 0;
+  for (const l of lines) {
+    if (l.durationMs == null) return null;
+    total += l.durationMs;
+  }
+  return LIP_HEAD_PAD_MS + total + LIP_LINE_GAP_MS * (lines.length - 1) + LIP_TAIL_PAD_MS;
+}
+
+/**
+ * 口パク（动画式对口型）指令：按配音时间轴分段描述"谁在什么时段说话、其余角色闭嘴"。
+ *
+ * 旧实现只写"A、B 正在说话"，模型会让两人全程一起张嘴，与"A 说完 B 再说"的真实音轨对不上。
+ * 这里按合成阶段同口径的时间轴（HEAD 200ms / 行间 300ms / TAIL 500ms）算出各说话人时段，
+ * 并显式要求非说话人闭嘴。返回不含 basePrompt，由调用方拼接；无具名台词时返回 ''（嘴不该动）。
+ */
+export async function buildLipSyncDirective(db: PrismaClient, shotId: string): Promise<string> {
+  const lines = await loadLipSyncLines(db, shotId);
+  const segments = toLipSyncSegments(lines);
+  if (segments.length === 0) return ''; // A. 纯旁白 / 无台词
+
+  const speakers: string[] = [];
+  for (const s of segments) if (!speakers.includes(s.speaker)) speakers.push(s.speaker);
+  const totalMs = lipSyncTimelineMs(lines);
+  const othersOf = (speaker: string): string[] => speakers.filter((n) => n !== speaker);
+
+  // B. 单一说话人：不需要时序，只要求本人开合、其他角色闭嘴
+  if (speakers.length === 1) {
+    const tail =
+      totalMs === null ? '' : `对话在前 ${secs(totalMs)} 秒内完成，之后该角色停止说话。`;
+    return `${at(speakers[0]!)} 正在说话，嘴部随台词节奏自然开合；画面中其他角色保持闭嘴聆听。${tail}`;
+  }
+
+  // D. 多说话人但时长未知：降级为顺序描述——绝不退回"两人同时说话"
+  const timed = segments.every((s) => s.startMs !== null && s.endMs !== null);
+  if (!timed) {
+    const parts = segments.map((s, i) => {
+      const others = othersOf(s.speaker);
+      const listen = others.length > 0 ? `（${others.map(at).join('、')} 闭嘴聆听）` : '';
+      return `${i === 0 ? '先' : '随后'} ${at(s.speaker)} 说话${listen}`;
+    });
+    return `口型时序：${parts.join('，')}。说话时段之外所有角色保持闭嘴。`;
+  }
+
+  // C. 多说话人轮流：逐段给出时间区间
+  const parts = segments.map((s, i) => {
+    const others = othersOf(s.speaker);
+    const listen = others.length > 0 ? `，此时 ${others.map(at).join('、')} 闭嘴聆听` : '';
+    const mouth = i === 0 ? '（嘴部开合）' : '';
+    return `${secs(s.startMs!)}–${secs(s.endMs!)} 秒 ${at(s.speaker)} 说话${mouth}${listen}`;
+  });
+  const tail = totalMs === null ? '' : `；对话在前 ${secs(totalMs)} 秒内完成`;
+  return `口型时序：${parts.join('；')}。说话时段之外所有角色保持闭嘴${tail}。`;
 }
 
 /** GENERATE_VIDEO：以选定关键图为首帧生成片段（衔接组段 1..N-1 改用上一段尾帧），实测时长 + 抽帧缩略图 */
@@ -378,12 +489,9 @@ function makeVideoExecutor(gens: GenerationGens): JobExecutor {
     // 时长链路（v2 §3）：配音锁定时长优先，未锁定用计划时长
     const durationMs = shot.durationLockedMs ?? shot.durationPlannedMs;
     const basePrompt = shot.videoPrompt || shot.sourceText;
-    // 口パク注入：有具名台词的镜头自动补"说话状态"（旁白镜头不注入，嘴不该动）
-    const speakers = await listSpeakerNames(db, shot.id);
-    const prompt =
-      speakers.length > 0
-        ? `${basePrompt}\n${speakers.join('、')}正在说话，嘴部自然开合，口型随台词节奏起伏`
-        : basePrompt;
+    // 口パク注入：有具名台词的镜头按配音时间轴补"谁在何时说话、其余角色闭嘴"（旁白镜头不注入，嘴不该动）
+    const lipSync = await buildLipSyncDirective(db, shot.id);
+    const prompt = lipSync ? `${basePrompt}\n${lipSync}` : basePrompt;
     const file = allocFilePath(job.projectId, 'mp4');
     await gens.videoGen({
       prompt,

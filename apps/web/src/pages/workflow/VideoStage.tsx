@@ -409,6 +409,39 @@ function KeyframePicker({ shotId, active }: { shotId: string; active: boolean })
   );
 }
 
+/** ---------- 口型提示的纯函数判定 ---------- */
+
+/**
+ * 该镜头的具名说话人 tagId（去重保序）。
+ * 旁白（isNarrator）与没绑定角色标签的行都不算——它们不会触发口型注入。
+ */
+function namedSpeakerIds(shot: ShotWithTakes): string[] {
+  const ids: string[] = [];
+  for (const line of shot.dialogue) {
+    if (line.isNarrator || line.speakerTagId === null) continue;
+    if (!ids.includes(line.speakerTagId)) ids.push(line.speakerTagId);
+  }
+  return ids;
+}
+
+/** 选定视频生成时是否带了口型指令；无记录/坏数据 = unknown（按"未注入"提示，正是上线前的旧视频） */
+type LipSyncState = 'injected' | 'missing' | 'unknown';
+
+function lipSyncStateOf(metaJson: string | undefined): LipSyncState {
+  try {
+    const meta = JSON.parse(metaJson ?? '{}') as { effectivePrompt?: string };
+    const prompt = meta.effectivePrompt;
+    if (typeof prompt !== 'string' || prompt === '') return 'unknown';
+    // 用「闭嘴」而非「说话」判定：分镜自己写的视频提示词里「说话」很常见
+    // （如"小悟对着镜头说话"），会把上线前生成的旧视频误判成已注入；
+    // 而口型指令的三个分支都必然包含「闭嘴」，基本不会在自然描述里出现。
+    return prompt.includes('闭嘴') ? 'injected' : 'missing';
+  } catch {
+    /* 坏数据当作无记录 */
+    return 'unknown';
+  }
+}
+
 /** ---------- 镜头卡片 ---------- */
 
 function VideoShotCard({
@@ -535,6 +568,13 @@ function VideoShotCard({
 
   const durationMs = shot.durationLockedMs ?? shot.durationPlannedMs;
   const durationLocked = shot.durationLockedMs !== null;
+
+  /* 口型提示：只在有具名台词时出现；无选定视频时无从判断，不显示 */
+  const speakerIds = namedSpeakerIds(shot);
+  const hasNamedDialogue = speakerIds.length > 0;
+  const lipSync = selectedVideo === null ? null : lipSyncStateOf(selectedVideo.asset.metaJson);
+  /* 已在衔接组内 = 已经按说话人拆过段，不再重复提醒 */
+  const showMultiSpeaker = speakerIds.length >= 2 && group === null;
 
   return (
     <Card size="small" style={{ marginBottom: 12 }}>
@@ -739,6 +779,27 @@ function VideoShotCard({
                   上游已变更
                 </Tag>
               </Popover>
+            )}
+            {/* 口型状态：有具名台词且已有选定视频时才判定 */}
+            {hasNamedDialogue &&
+              lipSync !== null &&
+              (lipSync === 'injected' ? (
+                <Tooltip title="该视频生成时已带口型指令，角色会按台词开合嘴部">
+                  <Tag color="green" style={{ marginInlineEnd: 0 }}>
+                    已含口型指令
+                  </Tag>
+                </Tooltip>
+              ) : (
+                <Tooltip title="这段视频生成于口型功能上线前，重新生成可让角色按台词开合嘴部">
+                  <Tag color="orange" style={{ marginInlineEnd: 0 }}>
+                    口型未注入
+                  </Tag>
+                </Tooltip>
+              ))}
+            {showMultiSpeaker && (
+              <Tooltip title="多个角色轮流说话时，口型更难对齐；把镜头拆成衔接组（每段一个说话人）可显著改善">
+                <Tag style={{ marginInlineEnd: 0 }}>{speakerIds.length} 人对话</Tag>
+              </Tooltip>
             )}
           </Space>
 

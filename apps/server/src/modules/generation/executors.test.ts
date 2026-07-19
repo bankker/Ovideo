@@ -8,7 +8,12 @@ import { STORAGE_ROOT, uriToAbsPath } from '../../lib/storage.js';
 import { toJson, parseJson } from '../../lib/json.js';
 import { makePlaceholderVideo } from '../../lib/ffmpeg.js';
 import { getExecutor, clearExecutors } from '../job/registry.js';
-import { registerGenerationExecutors, DUBBING_GAP_MS, type GenerationGens } from './executors.js';
+import {
+  registerGenerationExecutors,
+  buildLipSyncDirective,
+  DUBBING_GAP_MS,
+  type GenerationGens,
+} from './executors.js';
 import { mockImageGen, mockVideoGen, mockTtsGen, type GenModelCfg } from './gens.js';
 
 let t: TestDb;
@@ -506,13 +511,17 @@ describe('GENERATE_VIDEO', () => {
 
     const talking = await prepareShot(true);
     await getExecutor('GENERATE_VIDEO')!(await makeCtx('GENERATE_VIDEO', { shotId: talking.id }));
-    expect(prompts[0]).toContain(`${speaker.name}正在说话，嘴部自然开合`);
+    expect(prompts[0]).toContain(`@${speaker.name} 正在说话，嘴部随台词节奏自然开合`);
+    expect(prompts[0]).toContain('画面中其他角色保持闭嘴聆听');
 
+    // 回归：纯旁白镜头一个字的说话状态都不能注入（否则模型会让所有角色动嘴）
     const narratorOnly = await prepareShot(false);
     await getExecutor('GENERATE_VIDEO')!(
       await makeCtx('GENERATE_VIDEO', { shotId: narratorOnly.id }),
     );
-    expect(prompts[1]).not.toContain('正在说话');
+    expect(prompts[1]).not.toContain('说话');
+    expect(prompts[1]).not.toContain('口型');
+    expect(prompts[1]).not.toContain('嘴');
 
     // 生成透明度：实际提示词落在资产 meta
     const withMeta = await db.asset.findFirst({
@@ -520,6 +529,135 @@ describe('GENERATE_VIDEO', () => {
     });
     expect(withMeta).not.toBeNull();
   }, 60000);
+});
+
+describe('buildLipSyncDirective（按配音时间轴分段的口型指令）', () => {
+  /** 造说话人标签（名字带随机后缀，避免用例间串味） */
+  async function makeSpeaker(label: string) {
+    return db.tag.create({
+      data: { projectId, type: 'CHARACTER', name: `${label}-${crypto.randomUUID().slice(0, 4)}` },
+    });
+  }
+
+  /**
+   * 造一行台词 + 对应配音行。durationMs=null 表示配音未就绪（走降级分支）。
+   * speaker=null 表示旁白（占时间轴但不驱动口型）。
+   */
+  async function addLine(
+    shotId: string,
+    sortOrder: number,
+    speaker: { id: string } | null,
+    durationMs: number | null,
+  ) {
+    const dlg = await db.dialogueLine.create({
+      data: {
+        shotId,
+        sortOrder,
+        text: `第${sortOrder}句`,
+        isNarrator: speaker === null,
+        speakerTagId: speaker?.id ?? null,
+      },
+    });
+    await db.dubbingLine.create({
+      data: {
+        shotId,
+        dialogueLineId: dlg.id,
+        durationMs,
+        status: durationMs === null ? 'PENDING' : 'READY',
+      },
+    });
+    return dlg;
+  }
+
+  it('单一说话人：要求其他角色闭嘴聆听，不产生时序分段', async () => {
+    const { shot } = await seedShot();
+    const a = await makeSpeaker('小悟');
+    await addLine(shot.id, 0, a, 3600);
+    await addLine(shot.id, 1, a, 2000);
+
+    const d = await buildLipSyncDirective(db, shot.id);
+    expect(d).toContain(`@${a.name} 正在说话，嘴部随台词节奏自然开合`);
+    expect(d).toContain('画面中其他角色保持闭嘴聆听');
+    expect(d).not.toContain('时序');
+    // 总时长 = 200 + 3600 + 2000 + 300 + 500 = 6600
+    expect(d).toContain('对话在前 6.6 秒内完成');
+  });
+
+  it('两说话人轮流：按 200/300/500 口径算出各自时段，双方都被点名闭嘴聆听', async () => {
+    const { shot } = await seedShot();
+    const a = await makeSpeaker('小悟');
+    const b = await makeSpeaker('小空');
+    await addLine(shot.id, 0, a, 3600);
+    await addLine(shot.id, 1, b, 2000);
+
+    const d = await buildLipSyncDirective(db, shot.id);
+    // 第 1 段 200–3800ms，第 2 段 4100–6100ms（3600 后插 300ms 行间静音），总长 6600ms
+    expect(d).toContain(`0.2–3.8 秒 @${a.name} 说话`);
+    expect(d).toContain(`4.1–6.1 秒 @${b.name} 说话`);
+    expect(d).toContain('对话在前 6.6 秒内完成');
+    // 各时段都要点名对方闭嘴——这正是"两人同时张嘴"的修复点
+    expect(d).toContain(`此时 @${b.name} 闭嘴聆听`);
+    expect(d).toContain(`此时 @${a.name} 闭嘴聆听`);
+    expect(d).toContain('说话时段之外所有角色保持闭嘴');
+  });
+
+  it('同一说话人连续两句合并为一个时段（中间 300ms 间隔并入，不碎片化）', async () => {
+    const { shot } = await seedShot();
+    const a = await makeSpeaker('小悟');
+    const b = await makeSpeaker('小空');
+    await addLine(shot.id, 0, a, 1000);
+    await addLine(shot.id, 1, a, 1000);
+    await addLine(shot.id, 2, b, 2000);
+
+    const d = await buildLipSyncDirective(db, shot.id);
+    // A：200–1200 与 1500–2500 合并 → 0.2–2.5；B：2800–4800
+    expect(d).toContain(`0.2–2.5 秒 @${a.name} 说话`);
+    expect(d).toContain(`2.8–4.8 秒 @${b.name} 说话`);
+    expect(d.match(new RegExp(`@${a.name} 说话`, 'g'))).toHaveLength(1);
+    // 段数 = 2（分隔符"；"只在段间出现一次）
+    expect(d.split('秒 @').length - 1).toBe(2);
+  });
+
+  it('纯旁白镜头指令为空（旁白不驱动口型）', async () => {
+    const { shot } = await seedShot();
+    await addLine(shot.id, 0, null, 2000);
+    expect(await buildLipSyncDirective(db, shot.id)).toBe('');
+
+    const { shot: empty } = await seedShot();
+    expect(await buildLipSyncDirective(db, empty.id)).toBe('');
+  });
+
+  it('缺就绪配音时长：降级为无数字的顺序描述，绝不退回"两人同时说话"', async () => {
+    const { shot } = await seedShot();
+    const a = await makeSpeaker('小悟');
+    const b = await makeSpeaker('小空');
+    await addLine(shot.id, 0, a, 3600);
+    await addLine(shot.id, 1, b, null); // 配音未生成
+
+    const d = await buildLipSyncDirective(db, shot.id);
+    expect(d).toContain(`先 @${a.name} 说话（@${b.name} 闭嘴聆听）`);
+    expect(d).toContain(`随后 @${b.name} 说话（@${a.name} 闭嘴聆听）`);
+    expect(d).toContain('说话时段之外所有角色保持闭嘴');
+    expect(d).not.toContain('秒'); // 时长未知 → 不编造时间
+    expect(d).not.toContain('正在说话'); // 不能退回旧的"A、B 正在说话"同时张嘴文案
+  });
+
+  it('旁白夹在两句同一说话人之间时不合并（旁白期间角色应闭嘴）', async () => {
+    const { shot } = await seedShot();
+    const a = await makeSpeaker('小悟');
+    const b = await makeSpeaker('小空');
+    await addLine(shot.id, 0, a, 1000);
+    await addLine(shot.id, 1, null, 1000); // 旁白占时间轴
+    await addLine(shot.id, 2, a, 1000);
+    await addLine(shot.id, 3, b, 1000);
+
+    const d = await buildLipSyncDirective(db, shot.id);
+    // A 的两段被旁白（1.5–2.5）隔开：0.2–1.2 与 2.8–3.8；B：4.1–5.1
+    expect(d).toContain(`0.2–1.2 秒 @${a.name} 说话`);
+    expect(d).toContain(`2.8–3.8 秒 @${a.name} 说话`);
+    expect(d).toContain(`4.1–5.1 秒 @${b.name} 说话`);
+    expect(d).toContain('对话在前 5.6 秒内完成'); // 200 + 4×1000 + 3×300 + 500
+  });
 });
 
 describe('GENERATE_TTS', () => {
