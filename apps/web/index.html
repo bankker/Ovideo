@@ -4,6 +4,20 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Ovideo · AI 漫剧创作平台</title>
+    <style>
+      /*
+        最小重置：body 默认有 8px 外边距，会让 100vh 的布局整体多出 16px 而产生整页滚动条；
+        height:100% 链路一路铺到 #root，AppLayout 的 100vh 与各阶段的内部滚动才成立。
+      */
+      html,
+      body,
+      #root {
+        height: 100%;
+      }
+      body {
+        margin: 0;
+      }
+    </style>
   </head>
   <body>
     <div id="root"></div>

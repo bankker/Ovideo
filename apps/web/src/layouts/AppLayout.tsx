@@ -20,7 +20,12 @@ export function AppLayout() {
 
   return (
     <AntdApp>
-      <Layout style={{ minHeight: '100vh' }}>
+      {/*
+        用 height 而非 minHeight：minHeight 下子元素的 height:100% 无从解析，
+        WorkflowShell 那套 flex:1 / minHeight:0 / overflow:auto 会整条失效，
+        页面只能靠文档级滚动，内部区域也无法各自滚动。
+      */}
+      <Layout style={{ height: '100vh' }}>
         <Header style={{ display: 'flex', alignItems: 'center', gap: 24, paddingInline: 24 }}>
           <div
             onClick={() => navigate('/')}
@@ -54,7 +59,8 @@ export function AppLayout() {
             />
           </Tooltip>
         </Header>
-        <Content style={{ padding: 24 }}>
+        {/* 高度确定后由内容区自己滚动，替代此前的文档级滚动 */}
+        <Content style={{ padding: 24, overflow: 'auto' }}>
           <Outlet />
         </Content>
       </Layout>

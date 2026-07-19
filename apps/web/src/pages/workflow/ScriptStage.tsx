@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+
   useRef,
   useState,
   type Dispatch,
@@ -11,9 +12,9 @@ import { useQueryClient } from '@tanstack/react-query';
 import {
   Button,
   Card,
+  Divider,
   Empty,
   Input,
-  List,
   Modal,
   Popconfirm,
   Segmented,
@@ -24,6 +25,7 @@ import {
   Tooltip,
   Typography,
   message,
+  theme,
 } from 'antd';
 import {
   CheckOutlined,
@@ -35,12 +37,12 @@ import {
   EditOutlined,
   PlusOutlined,
   SendOutlined,
-  StarFilled,
   StarOutlined,
   ThunderboltOutlined,
   WarningOutlined,
 } from '@ant-design/icons';
 import type {
+  CapabilityEntry,
   ShotEditableFields,
   StoryboardPatch,
   StoryboardPatchOp,
@@ -55,6 +57,7 @@ import {
   useStoryboard,
   useStoryboards,
   useUpdateScriptDraft,
+  type ScriptDraft,
   type ShotDetail,
   type StoryboardDetail,
 } from '../../api/workflow-hooks';
@@ -324,240 +327,163 @@ export function ScriptStage() {
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
 
   /* ---------- 布局 ---------- */
+  /** 左侧草稿导航的折叠态：纯展示偏好，不必跨会话保留 */
+  const [railCollapsed, setRailCollapsed] = useState(false);
+
+  /** 生成进度：排队与运行中文案统一在右栏设置区呈现 */
+  const progressText =
+    runningJobId === null
+      ? null
+      : job?.status === 'RUNNING'
+        ? `生成中 ${job.progress}%`
+        : '任务排队中……';
+
   return (
     <div
+
       style={{
         display: 'flex',
         gap: 12,
         padding: 12,
         height: '100%',
-        minHeight: 480,
+        minHeight: 360,
         alignItems: 'stretch',
       }}
     >
-      {/* 左栏：剧本稿列表 */}
-      <Card
-        size="small"
-        title="剧本稿"
-        style={{ width: 260, flexShrink: 0, display: 'flex', flexDirection: 'column' }}
-        styles={{ body: { flex: 1, overflowY: 'auto', padding: 8 } }}
-        actions={[
-          <Button
-            key="starter"
-            type="link"
-            size="small"
-            icon={<BulbOutlined />}
-            disabled={showStarter}
-            onClick={() => setStarterOpen(true)}
-          >
-            AI 生成
-          </Button>,
-          <Button
-            key="create"
-            type="link"
-            size="small"
-            icon={<PlusOutlined />}
-            loading={createDraft.isPending}
-            onClick={handleCreateDraft}
-          >
-            新建
-          </Button>,
-        ]}
-      >
-        {draftsQuery.isLoading ? (
-          <div style={{ textAlign: 'center', padding: 24 }}>
-            <Spin />
-          </div>
-        ) : !drafts || drafts.length === 0 ? (
-          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无剧本稿" />
-        ) : (
-          <List
-            size="small"
-            dataSource={drafts}
-            split={false}
-            renderItem={(d) => (
-              <List.Item
-                onClick={() => {
-                  setSelectedDraftId(d.id);
-                  setStarterOpen(false); // 点开某一稿即离开创作入口
-                }}
-                style={{
-                  cursor: 'pointer',
-                  borderRadius: 6,
-                  padding: '6px 8px',
-                  marginBottom: 4,
-                  background: d.id === selectedDraftId ? '#e6f4ff' : undefined,
-                }}
-                actions={[
-                  d.isMain ? (
-                    <Tooltip key="main" title="当前主剧本">
-                      <Button
-                        type="text"
-                        size="small"
-                        icon={<StarFilled style={{ color: '#faad14' }} />}
-                      />
-                    </Tooltip>
-                  ) : (
-                    <Tooltip key="main" title="设为主剧本">
-                      <Button
-                        type="text"
-                        size="small"
-                        icon={<StarOutlined />}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleSetMain(d.id);
-                        }}
-                      />
-                    </Tooltip>
-                  ),
-                  <Tooltip key="rename" title="重命名">
-                    <Button
-                      type="text"
-                      size="small"
-                      icon={<EditOutlined />}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setRenameState({ id: d.id, title: d.title });
-                      }}
-                    />
-                  </Tooltip>,
-                ]}
-              >
-                <Space size={4} style={{ minWidth: 0 }}>
-                  <Text ellipsis style={{ maxWidth: 96 }}>
-                    {d.title}
-                  </Text>
-                  {d.isMain && <Tag color="gold">主剧本</Tag>}
-                </Space>
-              </List.Item>
-            )}
-          />
-        )}
-      </Card>
+      {/* 左栏：剧本稿导航 */}
+      <DraftRail
+        collapsed={railCollapsed}
+        onToggleCollapsed={() => setRailCollapsed((c) => !c)}
+        loading={draftsQuery.isLoading}
+        drafts={drafts}
+        selectedDraftId={selectedDraftId}
+        onSelect={(id) => {
+          setSelectedDraftId(id);
+          setStarterOpen(false); // 点开某一稿即离开创作入口
+        }}
+        onRename={(d) => setRenameState({ id: d.id, title: d.title })}
+        onSetMain={handleSetMain}
+        onOpenStarter={() => setStarterOpen(true)}
+        starterDisabled={showStarter}
+        onCreate={handleCreateDraft}
+        creating={createDraft.isPending}
+      />
 
-      {/* 中栏：内容编辑 + 三步生成 */}
-      <Card
-        size="small"
-        style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}
-        styles={{ body: { flex: 1, display: 'flex', flexDirection: 'column', gap: 12 } }}
-        title={
-          showStarter ? (
-            '新建剧本'
-          ) : selectedDraft ? (
-            <Space>
-              <span>{selectedDraft.title}</span>
-              {selectedDraft.isMain && <Tag color="gold">主剧本</Tag>}
-              {dirty && <Tag color="orange">未保存</Tag>}
-            </Space>
-          ) : (
-            '剧本内容'
-          )
-        }
-        extra={
-          showStarter ? (
-            // 已有剧本稿时才提供返回；一稿都没有时无处可返回
-            hasDrafts ? (
-              <Button size="small" icon={<ArrowLeftOutlined />} onClick={() => setStarterOpen(false)}>
-                返回编辑器
-              </Button>
-            ) : null
-          ) : (
-            <Space>
-              <Select
-                size="small"
-                style={{ width: 168 }}
-                allowClear
-                placeholder="文本模型（自动调度）"
-                value={textModelId}
-                onChange={(v) => setTextModelId(v)}
-                options={textModels.map((m) => ({
-                  value: m.modelConfigId,
-                  label: `${m.label}（${m.providerName}）`,
-                }))}
-              />
-              <Button
-                size="small"
-                disabled={!dirty}
-                loading={updateDraft.isPending}
-                onClick={saveContent}
-              >
-                保存
-              </Button>
-              <Button
-                size="small"
-                type="primary"
-                icon={<ThunderboltOutlined />}
-                disabled={selectedDraft === null}
-                loading={generating}
-                onClick={handleGenerate}
-              >
-                三步生成分镜
-              </Button>
-            </Space>
-          )
-        }
+      {/* 中央画布：剧本正文优先，四周无卡片边框 */}
+      <div
+        style={{
+          flex: 1,
+          minWidth: 0,
+          minHeight: 0, // 没有它，正文区的 flex:1 不会收缩，textarea 会把整栏顶高
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 8,
+        }}
       >
         {/* 生成成功后静默判重：发现拆裂标签才显示横幅（干净时零打扰） */}
         <TagDedup projectId={projectId} showButton={false} autoCheckSignal={dedupSignal} />
+
         {showStarter ? (
-          <div style={{ marginTop: 40 }}>
-            <ScriptStarter
-              episodeId={episodeId}
-              textModels={textModels}
-              textModelId={textModelId}
-              onTextModelChange={setTextModelId}
-              onCreated={handleStarterCreated}
-            />
-          </div>
+          <>
+            <div
+              style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '0 24px' }}
+            >
+              <span style={{ fontSize: 16, fontWeight: 600 }}>新建剧本</span>
+              <span style={{ flex: 1 }} />
+              {/* 已有剧本稿时才提供返回；一稿都没有时无处可返回 */}
+              {hasDrafts && (
+                <Button
+                  size="small"
+                  icon={<ArrowLeftOutlined />}
+                  onClick={() => setStarterOpen(false)}
+                >
+                  返回编辑器
+                </Button>
+              )}
+            </div>
+            <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', marginTop: 32 }}>
+              <ScriptStarter
+                episodeId={episodeId}
+                textModels={textModels}
+                textModelId={textModelId}
+                onTextModelChange={setTextModelId}
+                onCreated={handleStarterCreated}
+              />
+            </div>
+          </>
         ) : selectedDraft === null ? (
           <Empty description="请先在左侧选择或新建剧本稿" style={{ marginTop: 80 }} />
         ) : (
           <>
-            <Segmented
-              value={mode}
-              onChange={(v) => setMode(v as 'edit' | 'chat')}
-              options={[
-                { label: '编辑模式', value: 'edit' },
-                { label: '对话模式', value: 'chat' },
-              ]}
-              style={{ alignSelf: 'flex-start' }}
+            {/* 标题行：点标题即改名，省掉一次找按钮的往返 */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '0 24px' }}>
+              <Tooltip title="点击重命名">
+                <span
+                  role="button"
+                  tabIndex={0}
+                  style={{ fontSize: 16, fontWeight: 600, cursor: 'pointer' }}
+                  onClick={() => setRenameState({ id: selectedDraft.id, title: selectedDraft.title })}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      setRenameState({ id: selectedDraft.id, title: selectedDraft.title });
+                    }
+                  }}
+                >
+                  {selectedDraft.title}
+                </span>
+              </Tooltip>
+              {selectedDraft.isMain && <Tag color="gold">主剧本</Tag>}
+            </div>
+
+            <CanvasToolbar
+              mode={mode}
+              onModeChange={setMode}
+              dirty={dirty}
+              saving={updateDraft.isPending}
+              onSave={saveContent}
             />
+
             {mode === 'edit' ? (
-              <>
+              <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
                 <Input.TextArea
                   value={content}
                   onChange={(e) => setContent(e.target.value)}
                   onBlur={saveContent}
                   placeholder="在此粘贴或撰写剧本全文……"
-                  style={{ flex: 1, resize: 'none' }}
-                  rows={24}
+                  variant="borderless"
+                  style={{
+                    flex: 1,
+                    height: '100%',
+                    resize: 'none',
+                    fontSize: 15,
+                    lineHeight: 1.9,
+                    padding: '0 24px',
+                  }}
                 />
-                {runningJobId !== null && (
-                  <Text type="secondary" style={{ fontSize: 12 }}>
-                    生成任务进行中（{job?.status === 'RUNNING' ? `进度 ${job.progress}%` : '排队中'}）……
-                  </Text>
-                )}
-              </>
+              </div>
             ) : (
-              <ScriptChatPanel
-                draftId={selectedDraft.id}
-                storyboardId={selectedStoryboardId}
-                storyboard={storyboard}
-                modelConfigId={textModelId}
-                messages={chatMessages}
-                setMessages={setChatMessages}
-                applyPatch={applyPatch}
-                onSwitchStoryboard={setSelectedStoryboardId}
-              />
+              <div style={{ flex: 1, minHeight: 0, display: 'flex', padding: '0 24px' }}>
+                <ScriptChatPanel
+                  draftId={selectedDraft.id}
+                  storyboardId={selectedStoryboardId}
+                  storyboard={storyboard}
+                  modelConfigId={textModelId}
+                  messages={chatMessages}
+                  setMessages={setChatMessages}
+                  applyPatch={applyPatch}
+                  onSwitchStoryboard={setSelectedStoryboardId}
+                />
+              </div>
             )}
           </>
         )}
-      </Card>
+      </div>
 
-      {/* 右栏：分镜结果（可折叠） */}
+      {/* 右栏：生成设置 + 分镜结果（可折叠） */}
       {collapsed ? (
         <div style={{ width: 40, flexShrink: 0 }}>
-          <Tooltip title="展开分镜结果" placement="left">
+          <Tooltip title="展开生成设置与分镜结果" placement="left">
             <Button
               icon={<DoubleLeftOutlined />}
               onClick={() => setCollapsed(false)}
@@ -568,24 +494,17 @@ export function ScriptStage() {
           </Tooltip>
         </div>
       ) : (
-        <Card
-          size="small"
-          style={{ width: 420, flexShrink: 0, display: 'flex', flexDirection: 'column' }}
-          styles={{ body: { flex: 1, overflowY: 'auto', padding: 8 } }}
-          title={
-            <Space>
-              <span>分镜结果</span>
-              <Select
-                size="small"
-                style={{ width: 170 }}
-                placeholder="暂无版本"
-                value={selectedStoryboardId ?? undefined}
-                options={versionOptions}
-                onChange={(v) => setSelectedStoryboardId(v)}
-              />
-            </Space>
-          }
-          extra={
+        <div
+          style={{
+            width: 300,
+            flexShrink: 0,
+            display: 'flex',
+            flexDirection: 'column',
+            minHeight: 0,
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', marginBottom: 8 }}>
+            <span style={{ flex: 1 }} />
             <Tooltip title="收起">
               <Button
                 type="text"
@@ -594,59 +513,88 @@ export function ScriptStage() {
                 onClick={() => setCollapsed(true)}
               />
             </Tooltip>
-          }
-        >
-          {storyboardsQuery.isLoading || storyboardQuery.isLoading ? (
-            <div style={{ textAlign: 'center', padding: 40 }}>
-              <Spin />
-            </div>
-          ) : !storyboards || storyboards.length === 0 ? (
-            <Empty
-              image={Empty.PRESENTED_IMAGE_SIMPLE}
-              description="暂无分镜，请在中栏点击「三步生成分镜」"
-              style={{ marginTop: 60 }}
+          </div>
+
+          <SettingsPanel
+            textModels={textModels}
+            textModelId={textModelId}
+            onTextModelChange={setTextModelId}
+            generating={generating}
+            // 停留在创作入口时不允许对上一份草稿发起生成（保持改版前的语义）
+            disabled={selectedDraft === null || showStarter}
+            onGenerate={handleGenerate}
+            progressText={progressText}
+          />
+
+          <Divider style={{ margin: '12px 0' }} />
+
+          {/* 分镜结果：小标题 + 版本切换 + 可滚动镜头列表 */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, minHeight: 0, flex: 1 }}>
+            <Text strong style={{ fontSize: 13 }}>
+              分镜结果
+            </Text>
+            <Select
+              size="small"
+              style={{ width: '100%' }}
+              placeholder="暂无版本"
+              value={selectedStoryboardId ?? undefined}
+              options={versionOptions}
+              onChange={(v) => setSelectedStoryboardId(v)}
             />
-          ) : !storyboard || storyboard.shots.length === 0 ? (
-            <Empty
-              image={Empty.PRESENTED_IMAGE_SIMPLE}
-              description="该版本没有镜头"
-              style={{ marginTop: 60 }}
-            />
-          ) : (
-            <div>
-              {[...storyboard.shots]
-                .sort((a, b) => a.sortOrder - b.sortOrder)
-                .map((shot, index) => (
-                  <div key={shot.id}>
-                    <ShotCard
-                      shot={shot}
-                      index={index}
-                      patching={applyPatch.isPending}
-                      onUpdateShot={(shotId, fields) =>
-                        runPatch([{ op: 'update_shot', shotId, fields }], 'Prompt 已更新')
-                      }
-                      onRemove={(shotId) => {
-                        void runPatch([{ op: 'remove_shot', shotId }], '已删除镜头').catch(
-                          () => undefined,
-                        );
-                      }}
-                    />
-                    <div style={{ textAlign: 'center', margin: '4px 0 8px' }}>
-                      <Button
-                        type="dashed"
-                        size="small"
-                        icon={<PlusOutlined />}
-                        style={{ fontSize: 12, width: '90%' }}
-                        onClick={() => setInsertState({ afterShotId: shot.id, text: '' })}
-                      >
-                        插入分镜
-                      </Button>
-                    </div>
-                  </div>
-                ))}
+            <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
+              {storyboardsQuery.isLoading || storyboardQuery.isLoading ? (
+                <div style={{ textAlign: 'center', padding: 40 }}>
+                  <Spin />
+                </div>
+              ) : !storyboards || storyboards.length === 0 ? (
+                <Empty
+                  image={Empty.PRESENTED_IMAGE_SIMPLE}
+                  description="暂无分镜，请点击上方「三步生成分镜」"
+                  style={{ marginTop: 60 }}
+                />
+              ) : !storyboard || storyboard.shots.length === 0 ? (
+                <Empty
+                  image={Empty.PRESENTED_IMAGE_SIMPLE}
+                  description="该版本没有镜头"
+                  style={{ marginTop: 60 }}
+                />
+              ) : (
+                <div>
+                  {[...storyboard.shots]
+                    .sort((a, b) => a.sortOrder - b.sortOrder)
+                    .map((shot, index) => (
+                      <div key={shot.id}>
+                        <ShotCard
+                          shot={shot}
+                          index={index}
+                          patching={applyPatch.isPending}
+                          onUpdateShot={(shotId, fields) =>
+                            runPatch([{ op: 'update_shot', shotId, fields }], 'Prompt 已更新')
+                          }
+                          onRemove={(shotId) => {
+                            void runPatch([{ op: 'remove_shot', shotId }], '已删除镜头').catch(
+                              () => undefined,
+                            );
+                          }}
+                        />
+                        <div style={{ textAlign: 'center', margin: '4px 0 8px' }}>
+                          <Button
+                            type="dashed"
+                            size="small"
+                            icon={<PlusOutlined />}
+                            style={{ fontSize: 12, width: '90%' }}
+                            onClick={() => setInsertState({ afterShotId: shot.id, text: '' })}
+                          >
+                            插入分镜
+                          </Button>
+                        </div>
+                      </div>
+                    ))}
+                </div>
+              )}
             </div>
-          )}
-        </Card>
+          </div>
+        </div>
       )}
 
       {/* 重命名弹窗 */}
@@ -689,6 +637,329 @@ export function ScriptStage() {
           onChange={(e) => setInsertState((s) => (s === null ? s : { ...s, text: e.target.value }))}
         />
       </Modal>
+    </div>
+  );
+}
+
+/** ---------- 左侧草稿导航栏 ---------- */
+
+/**
+ * 剧本稿导航：只负责呈现与事件上抛，所有写操作 handler 由页面注入，
+ * 保持"数据在页面、样式在这里"的单向流。
+ */
+function DraftRail({
+  collapsed,
+  onToggleCollapsed,
+  loading,
+  drafts,
+  selectedDraftId,
+  onSelect,
+  onRename,
+  onSetMain,
+  onOpenStarter,
+  starterDisabled,
+  onCreate,
+  creating,
+}: {
+  collapsed: boolean;
+  onToggleCollapsed: () => void;
+  loading: boolean;
+  drafts: ScriptDraft[] | undefined;
+  selectedDraftId: string | null;
+  onSelect: (draftId: string) => void;
+  onRename: (draft: ScriptDraft) => void;
+  onSetMain: (draftId: string) => void;
+  onOpenStarter: () => void;
+  starterDisabled: boolean;
+  onCreate: () => void;
+  creating: boolean;
+}) {
+  const { token } = theme.useToken();
+  /** 行内操作按钮平时隐藏，悬停/选中才浮现——窄栏里先保证标题读得完整 */
+  const [hoveredId, setHoveredId] = useState<string | null>(null);
+
+  if (collapsed) {
+    return (
+      <div
+        style={{
+          width: 40,
+          flexShrink: 0,
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          gap: 4,
+        }}
+      >
+        <Tooltip title="展开剧本稿" placement="right">
+          <Button type="text" icon={<DoubleRightOutlined />} onClick={onToggleCollapsed} />
+        </Tooltip>
+        <Tooltip title="AI 生成剧本" placement="right">
+          <Button type="text" icon={<BulbOutlined />} disabled={starterDisabled} onClick={onOpenStarter} />
+        </Tooltip>
+        <Tooltip title="新建剧本稿" placement="right">
+          <Button type="text" icon={<PlusOutlined />} loading={creating} onClick={onCreate} />
+        </Tooltip>
+      </div>
+    );
+  }
+
+  return (
+    <div
+      style={{
+        width: 200,
+        flexShrink: 0,
+        display: 'flex',
+        flexDirection: 'column',
+        minHeight: 0,
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 2, marginBottom: 8 }}>
+        <Text strong style={{ fontSize: 13, flex: 1 }}>
+          剧本稿
+        </Text>
+        <Tooltip title="AI 生成剧本">
+          <Button
+            type="text"
+            size="small"
+            icon={<BulbOutlined />}
+            disabled={starterDisabled}
+            onClick={onOpenStarter}
+          />
+        </Tooltip>
+        <Tooltip title="新建剧本稿">
+          <Button
+            type="text"
+            size="small"
+            icon={<PlusOutlined />}
+            loading={creating}
+            onClick={onCreate}
+          />
+        </Tooltip>
+        <Tooltip title="收起">
+          <Button
+            type="text"
+            size="small"
+            icon={<DoubleLeftOutlined />}
+            onClick={onToggleCollapsed}
+          />
+        </Tooltip>
+      </div>
+
+      <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
+        {loading ? (
+          <div style={{ textAlign: 'center', padding: 24 }}>
+            <Spin />
+          </div>
+        ) : !drafts || drafts.length === 0 ? (
+          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无剧本稿" />
+        ) : (
+          drafts.map((d) => {
+            const active = d.id === selectedDraftId;
+            const showActions = active || hoveredId === d.id;
+            return (
+              <div
+                key={d.id}
+                onClick={() => onSelect(d.id)}
+                onMouseEnter={() => setHoveredId(d.id)}
+                onMouseLeave={() => setHoveredId((h) => (h === d.id ? null : h))}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 4,
+                  cursor: 'pointer',
+                  padding: '5px 6px 5px 9px',
+                  marginBottom: 2,
+                  borderRadius: token.borderRadius,
+                  // 选中态：主色竖条 + 浅填充；未选中悬停只给一层更淡的填充
+                  borderInlineStart: `3px solid ${active ? token.colorPrimary : 'transparent'}`,
+                  background: active
+                    ? token.colorFillSecondary
+                    : hoveredId === d.id
+                      ? token.colorFillQuaternary
+                      : undefined,
+                }}
+              >
+                <Text
+                  ellipsis
+                  style={{ flex: 1, minWidth: 0, fontSize: 13 }}
+                  title={d.title}
+                >
+                  {d.title}
+                </Text>
+                {d.isMain && (
+                  <Tooltip title="当前主剧本">
+                    <span
+                      style={{
+                        width: 6,
+                        height: 6,
+                        borderRadius: '50%',
+                        flexShrink: 0,
+                        background: token.colorWarning,
+                      }}
+                    />
+                  </Tooltip>
+                )}
+                {showActions && (
+                  <>
+                    {!d.isMain && (
+                      <Tooltip title="设为主剧本">
+                        <Button
+                          type="text"
+                          size="small"
+                          icon={<StarOutlined />}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onSetMain(d.id);
+                          }}
+                        />
+                      </Tooltip>
+                    )}
+                    <Tooltip title="重命名">
+                      <Button
+                        type="text"
+                        size="small"
+                        icon={<EditOutlined />}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onRename(d);
+                        }}
+                      />
+                    </Tooltip>
+                  </>
+                )}
+              </div>
+            );
+          })
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** ---------- 画布工具条 ---------- */
+
+/** 正文区上方的轻量工具条：左切模式、右报存盘状态（保存动作仍走页面的 saveContent） */
+function CanvasToolbar({
+  mode,
+  onModeChange,
+  dirty,
+  saving,
+  onSave,
+}: {
+  mode: 'edit' | 'chat';
+  onModeChange: (mode: 'edit' | 'chat') => void;
+  dirty: boolean;
+  saving: boolean;
+  onSave: () => void;
+}) {
+  const { token } = theme.useToken();
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '0 24px' }}>
+      <Segmented
+        size="small"
+        value={mode}
+        onChange={(v) => onModeChange(v as 'edit' | 'chat')}
+        options={[
+          { label: '编辑', value: 'edit' },
+          { label: '对话', value: 'chat' },
+        ]}
+      />
+      <span style={{ flex: 1 }} />
+      {saving ? (
+        <Text type="secondary" style={{ fontSize: 12 }}>
+          保存中…
+        </Text>
+      ) : dirty ? (
+        <Space size={4}>
+          <span style={{ fontSize: 12, color: token.colorWarning }}>未保存</span>
+          <Button type="link" size="small" style={{ padding: 0 }} onClick={onSave}>
+            保存
+          </Button>
+        </Space>
+      ) : (
+        <Text type="secondary" style={{ fontSize: 12 }}>
+          已保存
+        </Text>
+      )}
+    </div>
+  );
+}
+
+/** ---------- 右栏「生成设置」---------- */
+
+/** 三步生成的主操作区：模型选择 + 全页最显眼的主按钮 + 进度回显 */
+function SettingsPanel({
+  textModels,
+  textModelId,
+  onTextModelChange,
+  generating,
+  disabled,
+  onGenerate,
+  progressText,
+}: {
+  textModels: CapabilityEntry[];
+  textModelId: string | undefined;
+  onTextModelChange: (modelConfigId: string | undefined) => void;
+  generating: boolean;
+  disabled: boolean;
+  onGenerate: () => void;
+  progressText: string | null;
+}) {
+  const { token } = theme.useToken();
+  return (
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 8,
+        padding: 12,
+        borderRadius: token.borderRadiusLG,
+        border: `1px solid ${token.colorBorderSecondary}`,
+        background: token.colorFillQuaternary,
+      }}
+    >
+      <Text strong style={{ fontSize: 13 }}>
+        生成设置
+      </Text>
+
+      <Text type="secondary" style={{ fontSize: 12 }}>
+        文本模型
+      </Text>
+      <Select
+        size="small"
+        style={{ width: '100%' }}
+        allowClear
+        placeholder="文本模型（自动调度）"
+        value={textModelId}
+        onChange={(v) => onTextModelChange(v)}
+        options={textModels.map((m) => ({
+          value: m.modelConfigId,
+          label: `${m.label}（${m.providerName}）`,
+        }))}
+      />
+
+      <Button
+        type="primary"
+        size="large"
+        block
+        icon={<ThunderboltOutlined />}
+        disabled={disabled}
+        loading={generating}
+        onClick={onGenerate}
+        style={{ marginTop: 4 }}
+      >
+        三步生成分镜
+      </Button>
+
+      <Text type="secondary" style={{ fontSize: 12, lineHeight: 1.6 }}>
+        把剧本拆成镜头，并自动抽取角色 / 场景 / 道具要素
+      </Text>
+
+      {progressText !== null && (
+        <Text type="secondary" style={{ fontSize: 12 }}>
+          {progressText}
+        </Text>
+      )}
     </div>
   );
 }
@@ -762,6 +1033,7 @@ function ScriptChatPanel({
   onSwitchStoryboard: (storyboardId: string) => void;
 }) {
   const chat = useScriptChat();
+  const { token } = theme.useToken();
   const [input, setInput] = useState('');
   const listEndRef = useRef<HTMLDivElement | null>(null);
 
@@ -847,7 +1119,7 @@ function ScriptChatPanel({
                   <div
                     style={{
                       maxWidth: '85%',
-                      background: '#e6f4ff',
+                      background: token.colorPrimaryBg,
                       borderRadius: 8,
                       padding: '6px 10px',
                       whiteSpace: 'pre-wrap',
@@ -862,7 +1134,7 @@ function ScriptChatPanel({
                   <div
                     style={{
                       maxWidth: '92%',
-                      background: 'rgba(0,0,0,0.04)',
+                      background: token.colorFillTertiary,
                       borderRadius: 8,
                       padding: '8px 10px',
                       fontSize: 13,
@@ -904,7 +1176,7 @@ function ScriptChatPanel({
               <div style={{ display: 'flex', justifyContent: 'flex-start', marginBottom: 8 }}>
                 <div
                   style={{
-                    background: 'rgba(0,0,0,0.04)',
+                    background: token.colorFillTertiary,
                     borderRadius: 8,
                     padding: '8px 10px',
                     fontSize: 13,
@@ -971,6 +1243,7 @@ function ShotCard({
   onRemove: (shotId: string) => void;
 }) {
   const [editing, setEditing] = useState<{ field: PromptField; value: string } | null>(null);
+  const { token } = theme.useToken();
 
   const stale = shot.keyframeStale || shot.videoStale;
   const seconds = Math.round(shot.durationPlannedMs / 100) / 10;
@@ -1112,7 +1385,7 @@ function ShotCard({
       {renderPrompt('videoPrompt', '视频 Prompt')}
 
       {shot.dialogue.length > 0 && (
-        <div style={{ marginTop: 8, borderTop: '1px dashed rgba(5,5,5,0.1)', paddingTop: 6 }}>
+        <div style={{ marginTop: 8, borderTop: `1px dashed ${token.colorSplit}`, paddingTop: 6 }}>
           {[...shot.dialogue]
             .sort((a, b) => a.sortOrder - b.sortOrder)
             .map((line) => (
