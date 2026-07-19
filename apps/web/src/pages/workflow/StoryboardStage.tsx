@@ -27,6 +27,7 @@ import type { CapabilityEntry, StaleReason, TagType } from '@ovideo/shared';
 import { useApplyPatch, useStoryboards } from '../../api/workflow-hooks';
 import { useResolvedBindings, type ResolvedBindingCell } from '../../api/design-hooks';
 import { chooseRefCells } from '../../utils/ref-policy';
+import { EffectivePromptPopover } from '../../components/EffectivePromptPopover';
 import {
   useCapabilities,
   useClearStale,
@@ -381,6 +382,11 @@ function ShotKeyframeCard({
               }}
             >
               <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="尚未生成" />
+            </div>
+          )}
+          {selectedTake && (
+            <div style={{ marginTop: 6 }}>
+              <EffectivePromptPopover metaJson={selectedTake.asset.metaJson} />
             </div>
           )}
           {keyframeTakes.length > 0 && (

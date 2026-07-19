@@ -259,6 +259,9 @@ function makeDesignExecutor(gens: GenerationGens) {
       mime: 'image/png',
       sizeBytes: fileSize(file.absPath),
       jobId: job.id,
+      parentIds: tag.canonicalAssetId ? [tag.canonicalAssetId] : [],
+      // 生成透明度：与关键图一致，实际送模型的完整提示词与参考图可查
+      meta: { effectivePrompt: designPrompt.slice(0, 2000), refImages: refUris },
     });
     await db.asset.update({ where: { id: asset.id }, data: { thumbUri: file.uri } });
 

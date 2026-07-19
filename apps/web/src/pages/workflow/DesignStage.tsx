@@ -30,6 +30,7 @@ import type { CapabilityEntry, TagType } from '@ovideo/shared';
 import { useProject, useUpdateProject, type Project, type UpdateProjectInput } from '../../api/hooks';
 import { useJob } from '../../api/workflow-hooks';
 import { TagDedup } from '../../components/TagDedup';
+import { EffectivePromptPopover } from '../../components/EffectivePromptPopover';
 import {
   useCapabilities,
   useCreateTag,
@@ -509,6 +510,12 @@ function TagDesignCard({
                     style={{ position: 'absolute', top: 2, right: 2, opacity: 0.85 }}
                   />
                 </Popconfirm>
+                <div
+                  onClick={(e) => e.stopPropagation()}
+                  style={{ position: 'absolute', bottom: 2, right: 2 }}
+                >
+                  <EffectivePromptPopover metaJson={d.asset.metaJson} compact />
+                </div>
               </div>
             );
           })}
