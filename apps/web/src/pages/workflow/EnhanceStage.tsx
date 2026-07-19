@@ -24,6 +24,7 @@ import {
   useGenJob,
   useStoryboardTakes,
   type AudioMixMode,
+  type CutRatio,
   type ShotWithTakes,
   type TakeEntity,
 } from '../../api/video-hooks';
@@ -78,6 +79,7 @@ export function EnhanceStage() {
   /* ---------- 合成成片：POST cuts → { cut, job } → 轮询 ---------- */
   const createCut = useCreateCut(episodeId);
   const [audioMixMode, setAudioMixMode] = useState<AudioMixMode>('SMART');
+  const [cutRatio, setCutRatio] = useState<CutRatio>('AUTO');
   const [composeJobId, setComposeJobId] = useState<string | null>(null);
   const jobQuery = useGenJob(composeJobId, 2000);
   const job = jobQuery.data;
@@ -110,7 +112,7 @@ export function EnhanceStage() {
       return;
     }
     createCut.mutate(
-      { storyboardId: selectedStoryboardId, audioMixMode },
+      { storyboardId: selectedStoryboardId, audioMixMode, ratio: cutRatio },
       {
         onSuccess: ({ job: j }) => {
           message.success('已提交合成任务');
@@ -156,6 +158,25 @@ export function EnhanceStage() {
             </Text>
           )}
           <Space size={8}>
+            <Tooltip title="成片画幅：自动 = 跟随片段的实际分辨率（推荐）；显式比例会把所有片段等比缩放并补边到统一画布">
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                画幅
+              </Text>
+            </Tooltip>
+            <Select
+              size="small"
+              style={{ width: 110 }}
+              value={cutRatio}
+              onChange={(v: CutRatio) => setCutRatio(v)}
+              options={[
+                { value: 'AUTO', label: '自动（推荐）' },
+                { value: '9:16', label: '9:16 竖屏' },
+                { value: '16:9', label: '16:9 横屏' },
+                { value: '1:1', label: '1:1' },
+                { value: '3:4', label: '3:4' },
+                { value: '4:3', label: '4:3' },
+              ]}
+            />
             <Tooltip title="有配音的镜头如何处理视频自带的声音（无配音镜头总是保留原声）">
               <Text type="secondary" style={{ fontSize: 12 }}>
                 音轨

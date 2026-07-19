@@ -251,6 +251,9 @@ export function useCut(cutId: string | null) {
  */
 export type AudioMixMode = 'SMART' | 'DUCK' | 'MIX';
 
+/** 成片画幅：AUTO = 跟随首个片段的实际分辨率（默认），显式比例强制统一画布 */
+export type CutRatio = 'AUTO' | '9:16' | '16:9' | '1:1' | '3:4' | '4:3';
+
 /** 从选定 video takes 创建 Cut 并入队 COMPOSE_CUT；返回 { cut, job } */
 export function useCreateCut(episodeId: string) {
   const qc = useQueryClient();
@@ -258,15 +261,18 @@ export function useCreateCut(episodeId: string) {
     mutationFn: ({
       storyboardId,
       audioMixMode,
+      ratio,
     }: {
       storyboardId: string;
       audioMixMode?: AudioMixMode;
+      ratio?: CutRatio;
     }) =>
       api<CreateCutResult>(`/episodes/${episodeId}/cuts`, {
         method: 'POST',
         body: {
           storyboardId,
           ...(audioMixMode !== undefined ? { audioMixMode } : {}),
+          ...(ratio !== undefined ? { ratio } : {}),
         },
       }),
     onSuccess: () => {

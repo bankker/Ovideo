@@ -150,6 +150,62 @@ describe('COMPOSE_CUT 执行器（真 ffmpeg）', () => {
   });
 
   it(
+    '画幅自适应：横屏片段 AUTO 合成 → 成片保持横屏；显式 9:16 → 强制竖屏画布',
+    async () => {
+      const draft4 = await t.db.scriptDraft.create({ data: { episodeId, isMain: false } });
+      const sb4 = await t.db.storyboard.create({
+        data: { episodeId, scriptDraftId: draft4.id, version: 4 },
+      });
+      const landscape = allocFilePath(projectId, 'mp4');
+      await makePlaceholderVideo({
+        outPath: landscape.absPath,
+        durationMs: 1000,
+        width: 1280,
+        height: 720,
+      });
+      const asset = await t.db.asset.create({
+        data: {
+          projectId,
+          type: 'VIDEO',
+          source: 'GENERATED',
+          uri: landscape.uri,
+          mime: 'video/mp4',
+          sizeBytes: fileSize(landscape.absPath),
+          durationMs: await probeDurationMs(landscape.absPath),
+        },
+      });
+      const shot = await t.db.shot.create({
+        data: { storyboardId: sb4.id, sortOrder: 0, sourceText: '横屏镜头' },
+      });
+      const take = await t.db.take.create({
+        data: { shotId: shot.id, slot: 'VIDEO', assetId: asset.id },
+      });
+      await t.db.shot.update({ where: { id: shot.id }, data: { videoSelectedTakeId: take.id } });
+
+      const composeWithRatio = async (ratio: string) => {
+        const cut = await createCut(t.db, { episodeId, storyboardId: sb4.id });
+        const job = await makeJob({ cutId: cut.id, ratio });
+        const result = await composeCut({ db: t.db, job, updateProgress: async () => {} });
+        const out = await t.db.asset.findUnique({ where: { id: result.outputAssetIds![0] } });
+        const dims = await runFfmpeg(
+          ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height', '-of', 'csv=s=x:p=0', uriToAbsPath(out!.uri)],
+          'ffprobe',
+        );
+        return { record: { w: out!.width, h: out!.height }, actual: dims.trim() };
+      };
+
+      const auto = await composeWithRatio('AUTO');
+      expect(auto.actual).toBe('1280x720');
+      expect(auto.record).toEqual({ w: 1280, h: 720 });
+
+      const portrait = await composeWithRatio('9:16');
+      expect(portrait.actual).toBe('720x1280');
+      expect(portrait.record).toEqual({ w: 720, h: 1280 });
+    },
+    120_000,
+  );
+
+  it(
     '音轨模式：440Hz 原声视频 + 880Hz 配音 → SMART 压掉原声保留配音，MIX 两者叠加',
     async () => {
       const draft3 = await t.db.scriptDraft.create({ data: { episodeId, isMain: false } });

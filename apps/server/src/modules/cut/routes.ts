@@ -24,9 +24,12 @@ export interface CutRoutesOptions {
  * DUCK = 有配音镜头原声压低到 25% 与配音混合；MIX = 原声与配音等响叠加（旧行为）。
  */
 const AudioMixModeSchema = z.enum(['SMART', 'DUCK', 'MIX']);
+/** AUTO = 画布跟随首个片段的实际分辨率（默认）；显式比例强制统一画布 */
+const CutRatioSchema = z.enum(['AUTO', '9:16', '16:9', '1:1', '3:4', '4:3']);
 const CreateCutBodySchema = z.object({
   storyboardId: z.string().min(1),
   audioMixMode: AudioMixModeSchema.default('SMART'),
+  ratio: CutRatioSchema.default('AUTO'),
 });
 
 export const cutRoutes: FastifyPluginAsync<CutRoutesOptions> = async (app, { db, enqueue }) => {
@@ -42,7 +45,7 @@ export const cutRoutes: FastifyPluginAsync<CutRoutesOptions> = async (app, { db,
       projectId: episode.projectId,
       type: 'COMPOSE_CUT',
       executor: 'LOCAL',
-      inputPayload: { cutId: created.id, audioMixMode: body.audioMixMode },
+      inputPayload: { cutId: created.id, audioMixMode: body.audioMixMode, ratio: body.ratio },
     });
     reply.code(202);
     return { cut: await getCut(db, created.id), job };

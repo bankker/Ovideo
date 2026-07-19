@@ -59,6 +59,23 @@ export async function extractFrame(opts: { videoPath: string; timeMs: number; ou
   await runFfmpeg(['-y', '-ss', (timeMs / 1000).toFixed(3), '-i', videoPath, '-frames:v', '1', outPath]);
 }
 
+/** ffprobe 读视频流分辨率；无视频流/解析失败返回 null */
+export async function probeDimensions(
+  mediaPath: string,
+): Promise<{ width: number; height: number } | null> {
+  try {
+    const out = await runFfmpeg(
+      ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height', '-of', 'csv=s=x:p=0', mediaPath],
+      'ffprobe',
+    );
+    const m = /^(\d+)x(\d+)/.exec(out.trim());
+    if (!m) return null;
+    return { width: parseInt(m[1], 10), height: parseInt(m[2], 10) };
+  } catch {
+    return null;
+  }
+}
+
 /** ffprobe 读媒体时长（毫秒） */
 export async function probeDurationMs(mediaPath: string): Promise<number> {
   const out = await runFfmpeg(
