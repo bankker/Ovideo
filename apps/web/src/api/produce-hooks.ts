@@ -146,10 +146,28 @@ export function useSyncDubbing() {
 export function useUpdateDubbingLine() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ lineId, speed }: { lineId: string; shotId: string; speed: number }) =>
-      api<DubbingLineEntity>(`/dubbing-lines/${lineId}`, { method: 'PATCH', body: { speed } }),
+    mutationFn: ({
+      lineId,
+      speed,
+      text,
+    }: {
+      lineId: string;
+      shotId: string;
+      speed?: number;
+      /** 台词文案：服务端会改写来源对白并把该行打回待生成 */
+      text?: string;
+    }) =>
+      api<DubbingLineEntity>(`/dubbing-lines/${lineId}`, {
+        method: 'PATCH',
+        body: {
+          ...(speed !== undefined ? { speed } : {}),
+          ...(text !== undefined ? { text } : {}),
+        },
+      }),
     onSuccess: (_data, variables) => {
       void qc.invalidateQueries({ queryKey: ['dubbing', variables.shotId] });
+      // 台词改写会同步改到分镜对白，分镜/时长视图需要一并刷新
+      void qc.invalidateQueries({ queryKey: ['storyboard'] });
     },
   });
 }

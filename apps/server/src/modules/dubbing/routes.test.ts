@@ -118,15 +118,19 @@ describe('PATCH /api/dubbing-lines/:id', () => {
     expect(res.json().status).toBe('PENDING');
   });
 
-  it('带对白来源的行改 text → 400', async () => {
-    const line = await t.db.dubbingLine.findFirstOrThrow({ where: { shotId: shot1Id } });
+  it('改 text → 200，来源对白被改写且行回到 PENDING', async () => {
+    const line = await t.db.dubbingLine.findFirstOrThrow({
+      where: { shotId: shot1Id, dialogueLineId: { not: null } },
+    });
+    await t.db.dubbingLine.update({ where: { id: line.id }, data: { status: 'READY' } });
     const res = await app.inject({
       method: 'PATCH',
       url: `/api/dubbing-lines/${line.id}`,
-      payload: { text: '私改台词' },
+      payload: { text: '页面上改的新台词' },
     });
-    expect(res.statusCode).toBe(400);
-    expect(res.json().error).toContain('对白');
+    expect(res.statusCode).toBe(200);
+    expect(res.json().dialogueLine.text).toBe('页面上改的新台词');
+    expect(res.json().status).toBe('PENDING');
   });
 
   it('speed 越界（>2）→ 400；配音行不存在 → 404', async () => {

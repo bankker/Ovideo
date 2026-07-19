@@ -115,9 +115,40 @@ describe('updateDubbingLine', () => {
     expect(updated.status).toBe('READY');
   });
 
-  it('带对白来源的行改 text → 400（文本以对白为准）', async () => {
+  it('改 text：改写来源对白、行打回 PENDING、旧音频保留', async () => {
     const line = (await listDubbingLines(db, shot1Id))[0];
-    await expect(updateDubbingLine(db, line.id, { text: '改台词' })).rejects.toMatchObject({
+    const audio = await db.asset.create({
+      data: { projectId, type: 'AUDIO', source: 'GENERATED', uri: `/storage/${projectId}/t.wav` },
+    });
+    await db.dubbingLine.update({
+      where: { id: line.id },
+      data: { status: 'READY', audioAssetId: audio.id, durationMs: 1500 },
+    });
+
+    const updated = await updateDubbingLine(db, line.id, { text: '  改后的台词  ' });
+    expect(updated.dialogueLine?.text).toBe('改后的台词'); // 首尾空白被裁掉
+    expect(updated.status).toBe('PENDING');
+    expect(updated.audioAssetId).toBe(audio.id); // 旧音频保留，只标记需重新生成
+    // 来源对白确实被改写（分镜页看到的也是新文案）
+    const dialogue = await db.dialogueLine.findUnique({ where: { id: line.dialogueLineId! } });
+    expect(dialogue?.text).toBe('改后的台词');
+  });
+
+  it('text 与当前对白相同：空操作，状态不回退', async () => {
+    const line = (await listDubbingLines(db, shot1Id))[0];
+    await db.dubbingLine.update({ where: { id: line.id }, data: { status: 'READY' } });
+    const same = line.dialogueLine!.text;
+    const updated = await updateDubbingLine(db, line.id, { text: same });
+    expect(updated.status).toBe('READY');
+  });
+
+  it('text 为空白 → 400；无对白来源的自由行改 text → 400', async () => {
+    const line = (await listDubbingLines(db, shot1Id))[0];
+    await expect(updateDubbingLine(db, line.id, { text: '   ' })).rejects.toMatchObject({
+      statusCode: 400,
+    });
+    const free = await db.dubbingLine.create({ data: { shotId: shot1Id } });
+    await expect(updateDubbingLine(db, free.id, { text: '随便' })).rejects.toMatchObject({
       statusCode: 400,
     });
   });

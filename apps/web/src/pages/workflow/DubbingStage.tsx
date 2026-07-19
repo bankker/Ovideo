@@ -5,6 +5,7 @@ import {
   Button,
   Card,
   Empty,
+  Input,
   InputNumber,
   Select,
   Space,
@@ -16,6 +17,7 @@ import {
   message,
 } from 'antd';
 import {
+  EditOutlined,
   SoundOutlined,
   SyncOutlined,
   ThunderboltOutlined,
@@ -368,7 +370,15 @@ function ShotDubbingGroup({
       title: '文本',
       key: 'text',
       render: (_: unknown, line: DubbingLineEntity) => (
-        <Text style={{ fontSize: 13 }}>{line.dialogueLine?.text ?? line.text ?? ''}</Text>
+        <EditableLineText
+          line={line}
+          saving={updateLine.isPending}
+          onSave={(text) =>
+            updateLine.mutateAsync({ lineId: line.id, shotId: shot.id, text }).then(() => {
+              message.success('台词已更新，请重新生成该行配音');
+            })
+          }
+        />
       ),
     },
     {
@@ -529,5 +539,82 @@ function LineGenerateButton({
     >
       {line.status === 'READY' ? '重新生成' : '生成'}
     </Button>
+  );
+}
+
+/** ---------- 台词就地编辑 ---------- */
+
+/**
+ * 配音表格的文本单元格：点击进入编辑，Enter 保存 / Esc 取消（Shift+Enter 换行）。
+ * 保存后服务端改写来源对白并把该行打回待生成，故此处不做本地乐观更新，等列表刷新为准。
+ */
+function EditableLineText({
+  line,
+  saving,
+  onSave,
+}: {
+  line: DubbingLineEntity;
+  saving: boolean;
+  onSave: (text: string) => Promise<unknown>;
+}) {
+  const current = line.dialogueLine?.text ?? line.text ?? '';
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(current);
+  const editable = Boolean(line.dialogueLine);
+
+  const commit = () => {
+    const next = draft.trim();
+    if (next === '' || next === current) {
+      setEditing(false);
+      setDraft(current);
+      return;
+    }
+    void onSave(next)
+      .then(() => setEditing(false))
+      .catch((e: unknown) => {
+        message.error(e instanceof Error ? e.message : '台词保存失败');
+      });
+  };
+
+  if (!editable) {
+    return <Text style={{ fontSize: 13 }}>{current}</Text>;
+  }
+
+  if (editing) {
+    return (
+      <Input.TextArea
+        autoFocus
+        autoSize={{ minRows: 1, maxRows: 6 }}
+        value={draft}
+        disabled={saving}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            commit();
+          } else if (e.key === 'Escape') {
+            setDraft(current);
+            setEditing(false);
+          }
+        }}
+        style={{ fontSize: 13 }}
+      />
+    );
+  }
+
+  return (
+    <Tooltip title="点击修改台词（改后需重新生成该行配音）">
+      <div
+        onClick={() => {
+          setDraft(current);
+          setEditing(true);
+        }}
+        style={{ cursor: 'text', minHeight: 22 }}
+      >
+        <Text style={{ fontSize: 13 }}>{current}</Text>
+        <EditOutlined style={{ fontSize: 11, opacity: 0.35, marginInlineStart: 6 }} />
+      </div>
+    </Tooltip>
   );
 }

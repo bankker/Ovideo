@@ -100,14 +100,15 @@ export async function syncDubbingLines(
 export interface UpdateDubbingLineInput {
   /** 语速 0.5~2（路由层 zod 校验范围） */
   speed?: number;
-  /** 仅自由行（无对白来源）理论上可改；对白行文本以对白为准 */
+  /** 台词文案：直接改写来源对白（只作用于当前分镜版本的这条对白） */
   text?: string;
 }
 
 /**
  * 行编辑：
- * - text：对白来源的行 → 400（文本以对白为准，请改分镜对白）；
- *   自由行 → 当前数据模型 DubbingLine 无文本列且 M2 无自由行创建入口，明确 400 防误用。
+ * - text：改写来源 DialogueLine.text。文案变了旧音频就对不上，故把行打回 PENDING 等待重新生成；
+ *   旧音频资产保留不删（付费产物保护），时长锁定留到重新生成时由 TTS 执行器重算。
+ *   无对白来源的自由行没有文本列可写，明确 400 防误用。
  * - speed：值变化才生效——status 回 PENDING（需重新生成），旧音频资产保留不删。
  */
 export async function updateDubbingLine(
@@ -118,19 +119,30 @@ export async function updateDubbingLine(
   const line = await db.dubbingLine.findUnique({ where: { id }, include: LINE_INCLUDE });
   if (!line) throw notFound('配音行');
 
+  let textChanged = false;
   if (input.text !== undefined) {
-    if (line.dialogueLineId) {
-      throw badRequest('该行文本来自分镜对白，以对白为准，请在分镜页修改对白内容');
+    if (!line.dialogueLineId || !line.dialogueLine) {
+      throw badRequest('该配音行没有对白来源，无法修改文案');
     }
-    throw badRequest('自由配音行暂不支持修改文本（M2 配音行均由对白同步产生）');
+    const next = input.text.trim();
+    if (next === '') throw badRequest('台词内容不能为空');
+    if (next !== line.dialogueLine.text) {
+      await db.dialogueLine.update({ where: { id: line.dialogueLineId }, data: { text: next } });
+      textChanged = true;
+    }
   }
 
-  if (input.speed !== undefined && input.speed !== line.speed) {
+  const speedChanged = input.speed !== undefined && input.speed !== line.speed;
+  if (textChanged || speedChanged) {
     return db.dubbingLine.update({
       where: { id },
-      data: { speed: input.speed, status: 'PENDING' },
+      data: {
+        ...(speedChanged ? { speed: input.speed } : {}),
+        status: 'PENDING',
+      },
       include: LINE_INCLUDE,
     });
   }
-  return line;
+  // 无实质变化：重查一次保证返回的 dialogueLine 是最新的
+  return (await db.dubbingLine.findUnique({ where: { id }, include: LINE_INCLUDE }))!;
 }

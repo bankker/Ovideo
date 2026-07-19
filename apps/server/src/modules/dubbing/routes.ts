@@ -18,7 +18,8 @@ export type EnqueueFn = (input: {
 
 const PatchDubbingLineBodySchema = z.object({
   speed: z.number().min(0.5).max(2).optional(),
-  text: z.string().min(1).optional(),
+  // 台词文案：改写来源对白，服务层会把该行打回待生成
+  text: z.string().min(1).max(2000).optional(),
 });
 
 const GenerateDubbingBodySchema = z.object({
