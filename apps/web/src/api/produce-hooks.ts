@@ -158,8 +158,11 @@ export function useUpdateDubbingLine() {
 export function useGenerateDubbingLine() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ lineId }: { lineId: string; shotId: string }) =>
-      api<JobEntity>(`/dubbing-lines/${lineId}/generate`, { method: 'POST', body: {} }),
+    mutationFn: ({ lineId, modelConfigId }: { lineId: string; shotId: string; modelConfigId?: string }) =>
+      api<JobEntity>(`/dubbing-lines/${lineId}/generate`, {
+        method: 'POST',
+        body: modelConfigId !== undefined ? { modelConfigId } : {},
+      }),
     onSuccess: (_data, variables) => {
       // 行状态切到 GENERATING，触发该行查询的轮询
       void qc.invalidateQueries({ queryKey: ['dubbing', variables.shotId] });
@@ -171,10 +174,10 @@ export function useGenerateDubbingLine() {
 export function useGenerateAllDubbing() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (storyboardId: string) =>
+    mutationFn: ({ storyboardId, modelConfigId }: { storyboardId: string; modelConfigId?: string }) =>
       api<GenerateAllDubbingResult>(`/storyboards/${storyboardId}/dubbing/generate-all`, {
         method: 'POST',
-        body: {},
+        body: modelConfigId !== undefined ? { modelConfigId } : {},
       }),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: ['dubbing'] });

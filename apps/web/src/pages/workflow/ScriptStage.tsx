@@ -50,6 +50,7 @@ import {
   type StoryboardDetail,
 } from '../../api/workflow-hooks';
 import { TagDedup } from '../../components/TagDedup';
+import { useCapabilities } from '../../api/produce-hooks';
 import { useScriptChat } from '../../api/chat-hooks';
 
 const { Text, Paragraph } = Typography;
@@ -158,6 +159,10 @@ export function ScriptStage() {
 
   /* ---------- 三步生成 + Job 轮询 ---------- */
   const generate = useGenerateStoryboard();
+  /* 文本模型选择（三步生成与对话修改共用；undefined = 自动调度 + 失效转移） */
+  const textModelsQuery = useCapabilities('text');
+  const textModels = textModelsQuery.data ?? [];
+  const [textModelId, setTextModelId] = useState<string | undefined>(undefined);
   const [runningJobId, setRunningJobId] = useState<string | null>(null);
   const jobQuery = useJob(runningJobId);
   const job = jobQuery.data;
@@ -188,13 +193,16 @@ export function ScriptStage() {
       message.warning('请先保存剧本内容再生成');
       return;
     }
-    generate.mutate(selectedDraft.id, {
-      onSuccess: (j) => {
-        message.success('已提交生成任务');
-        setRunningJobId(j.id);
+    generate.mutate(
+      { draftId: selectedDraft.id, modelConfigId: textModelId },
+      {
+        onSuccess: (j) => {
+          message.success('已提交生成任务');
+          setRunningJobId(j.id);
+        },
+        onError: (e) => message.error(e.message),
       },
-      onError: (e) => message.error(e.message),
-    });
+    );
   };
 
   /* ---------- 分镜结果 ---------- */
@@ -389,6 +397,18 @@ export function ScriptStage() {
         }
         extra={
           <Space>
+            <Select
+              size="small"
+              style={{ width: 168 }}
+              allowClear
+              placeholder="文本模型（自动调度）"
+              value={textModelId}
+              onChange={(v) => setTextModelId(v)}
+              options={textModels.map((m) => ({
+                value: m.modelConfigId,
+                label: `${m.label}（${m.providerName}）`,
+              }))}
+            />
             <Button
               size="small"
               disabled={!dirty}
@@ -446,6 +466,7 @@ export function ScriptStage() {
                 draftId={selectedDraft.id}
                 storyboardId={selectedStoryboardId}
                 storyboard={storyboard}
+                modelConfigId={textModelId}
                 messages={chatMessages}
                 setMessages={setChatMessages}
                 applyPatch={applyPatch}
@@ -647,6 +668,7 @@ function ScriptChatPanel({
   draftId,
   storyboardId,
   storyboard,
+  modelConfigId,
   messages,
   setMessages,
   applyPatch,
@@ -655,6 +677,8 @@ function ScriptChatPanel({
   draftId: string;
   storyboardId: string | null;
   storyboard: StoryboardDetail | undefined;
+  /** 顶栏选中的文本模型（与三步生成共用；undefined = 自动调度） */
+  modelConfigId?: string;
   messages: ChatMessage[];
   setMessages: Dispatch<SetStateAction<ChatMessage[]>>;
   applyPatch: ReturnType<typeof useApplyPatch>;
@@ -684,7 +708,7 @@ function ScriptChatPanel({
     const userMsgId = nextChatMessageId();
     setMessages((prev) => [...prev, { id: userMsgId, role: 'user', text }]);
     chat.mutate(
-      { draftId, message: text, baseStoryboardId: storyboardId },
+      { draftId, message: text, baseStoryboardId: storyboardId, modelConfigId },
       {
         onSuccess: (res) => {
           setInput('');

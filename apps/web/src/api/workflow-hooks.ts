@@ -149,8 +149,11 @@ export function useUpdateScriptDraft(episodeId: string) {
 
 export function useGenerateStoryboard() {
   return useMutation({
-    mutationFn: (draftId: string) =>
-      api<JobEntity>(`/script-drafts/${draftId}/generate-storyboard`, { method: 'POST', body: {} }),
+    mutationFn: ({ draftId, modelConfigId }: { draftId: string; modelConfigId?: string }) =>
+      api<JobEntity>(`/script-drafts/${draftId}/generate-storyboard`, {
+        method: 'POST',
+        body: modelConfigId !== undefined ? { modelConfigId } : {},
+      }),
   });
 }
 

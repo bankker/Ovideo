@@ -20,6 +20,7 @@ import type { DubbingStatus } from '@ovideo/shared';
 import { useStoryboards } from '../../api/workflow-hooks';
 import {
   dubbingQueryOptions,
+  useCapabilities,
   useGenerateAllDubbing,
   useGenerateDubbingLine,
   useShotJob,
@@ -98,6 +99,11 @@ export function DubbingStage() {
     });
   }, [shots, dubbingQueries, syncDubbing]);
 
+  /* ---------- 语音模型选择（undefined = 自动调度 tts 队首模型） ---------- */
+  const ttsModelsQuery = useCapabilities('tts');
+  const ttsModels = ttsModelsQuery.data ?? [];
+  const [ttsModelId, setTtsModelId] = useState<string | undefined>(undefined);
+
   /* ---------- 全部生成 + 批量完成检测 ---------- */
   const generateAll = useGenerateAllDubbing();
   const [awaitingBatch, setAwaitingBatch] = useState(false);
@@ -128,7 +134,7 @@ export function DubbingStage() {
 
   const handleGenerateAll = () => {
     if (selectedStoryboardId === null) return;
-    generateAll.mutate(selectedStoryboardId, {
+    generateAll.mutate({ storyboardId: selectedStoryboardId, modelConfigId: ttsModelId }, {
       onSuccess: (result) => {
         const n = result.enqueued ?? result.jobs?.length;
         message.success(n !== undefined ? `已提交 ${n} 条配音生成任务` : '已提交全部生成任务');
@@ -166,6 +172,18 @@ export function DubbingStage() {
         }
         extra={
           <Space>
+            <Select
+              size="small"
+              style={{ width: 190 }}
+              allowClear
+              placeholder="语音模型（自动调度）"
+              value={ttsModelId}
+              onChange={(v) => setTtsModelId(v)}
+              options={ttsModels.map((m) => ({
+                value: m.modelConfigId,
+                label: `${m.label}（${m.providerName}）`,
+              }))}
+            />
             {(generatingCount > 0 || awaitingBatch) && (
               <Text type="secondary" style={{ fontSize: 12 }}>
                 <SyncOutlined spin /> 生成中 {generatingCount} 条…
@@ -198,6 +216,7 @@ export function DubbingStage() {
               shot={shot}
               index={index}
               storyboardId={selectedStoryboardId ?? ''}
+              modelConfigId={ttsModelId}
               lines={dubbingQueries[index]?.data ?? []}
               loading={dubbingQueries[index]?.isLoading ?? false}
             />
@@ -214,12 +233,15 @@ function ShotDubbingGroup({
   shot,
   index,
   storyboardId,
+  modelConfigId,
   lines,
   loading,
 }: {
   shot: ProduceShot;
   index: number;
   storyboardId: string;
+  /** 顶栏选中的语音模型（undefined = 自动调度） */
+  modelConfigId?: string;
   lines: DubbingLineEntity[];
   loading: boolean;
 }) {
@@ -299,7 +321,7 @@ function ShotDubbingGroup({
       key: 'actions',
       width: 100,
       render: (_: unknown, line: DubbingLineEntity) => (
-        <LineGenerateButton line={line} storyboardId={storyboardId} />
+        <LineGenerateButton line={line} storyboardId={storyboardId} modelConfigId={modelConfigId} />
       ),
     },
   ];
@@ -360,9 +382,11 @@ function ShotDubbingGroup({
 function LineGenerateButton({
   line,
   storyboardId,
+  modelConfigId,
 }: {
   line: DubbingLineEntity;
   storyboardId: string;
+  modelConfigId?: string;
 }) {
   const qc = useQueryClient();
   const generate = useGenerateDubbingLine();
@@ -388,7 +412,7 @@ function LineGenerateButton({
       loading={running}
       onClick={() =>
         generate.mutate(
-          { lineId: line.id, shotId: line.shotId },
+          { lineId: line.id, shotId: line.shotId, modelConfigId },
           {
             onSuccess: (job) => {
               message.success('已提交生成任务');

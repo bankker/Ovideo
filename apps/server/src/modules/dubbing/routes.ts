@@ -24,6 +24,12 @@ const PatchDubbingLineBodySchema = z.object({
 const GenerateDubbingBodySchema = z.object({
   /** 入队前顺手更新语速（S1 路由表 body { speed? }） */
   speed: z.number().min(0.5).max(2).optional(),
+  /** 指定语音模型；缺省走按需调度（tts 队首真实模型） */
+  modelConfigId: z.string().optional(),
+});
+
+const GenerateAllDubbingBodySchema = z.object({
+  modelConfigId: z.string().optional(),
 });
 
 export interface DubbingRoutesOptions {
@@ -68,7 +74,7 @@ export const dubbingRoutes: FastifyPluginAsync<DubbingRoutesOptions> = async (
       projectId: line.shot.storyboard.episode.projectId,
       type: 'GENERATE_TTS',
       executor: 'API',
-      inputPayload: { kind: 'dubbing', dubbingLineId: id },
+      inputPayload: { kind: 'dubbing', dubbingLineId: id, modelConfigId: body.modelConfigId },
     });
     await db.dubbingLine.update({ where: { id }, data: { status: 'GENERATING' } });
     reply.code(202);
@@ -78,6 +84,7 @@ export const dubbingRoutes: FastifyPluginAsync<DubbingRoutesOptions> = async (
   // 全部生成：先对分镜全部镜头做 sync-dubbing 语义的同步，再对 status != READY 的行批量入队（共享 batchId）
   app.post('/api/storyboards/:id/dubbing/generate-all', async (req) => {
     const { id } = req.params as { id: string };
+    const allBody = GenerateAllDubbingBodySchema.parse(req.body ?? {});
     const storyboard = await db.storyboard.findUnique({
       where: { id },
       include: { episode: true, shots: { orderBy: { sortOrder: 'asc' } } },
@@ -112,7 +119,7 @@ export const dubbingRoutes: FastifyPluginAsync<DubbingRoutesOptions> = async (
         projectId: storyboard.episode.projectId,
         type: 'GENERATE_TTS',
         executor: 'API',
-        inputPayload: { kind: 'dubbing', dubbingLineId: line.id },
+        inputPayload: { kind: 'dubbing', dubbingLineId: line.id, modelConfigId: allBody.modelConfigId },
         batchId,
       });
       await db.dubbingLine.update({ where: { id: line.id }, data: { status: 'GENERATING' } });

@@ -21,14 +21,16 @@ export function useScriptChat() {
       draftId,
       message,
       baseStoryboardId,
+      modelConfigId,
     }: {
       draftId: string;
       message: string;
       baseStoryboardId: string;
+      modelConfigId?: string;
     }) =>
       api<ScriptChatResult>(`/script-drafts/${draftId}/chat`, {
         method: 'POST',
-        body: { message, baseStoryboardId },
+        body: { message, baseStoryboardId, ...(modelConfigId !== undefined ? { modelConfigId } : {}) },
       }),
   });
 }

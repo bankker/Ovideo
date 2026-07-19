@@ -228,7 +228,23 @@ export async function buildApp(opts: BuildAppOptions = {}) {
     db,
     enqueue, // 统一走按需调度入队（未指定模型时自动选队首真实模型）
     hooks: { onScriptDraftChanged: stale.onScriptDraftChanged },
-    chat: createScriptChat({ textGen: chatTextGen }),
+    // 对话式修改按请求路由模型：显式指定 → 只用该模型；缺省 → 按需调度 + 失效转移
+    chat: async (chatDb, params) => {
+      let textGen = chatTextGen;
+      if (params.modelConfigId) {
+        const model = await chatDb.modelConfig.findUnique({
+          where: { id: params.modelConfigId },
+          include: { provider: true },
+        });
+        if (!model || !model.enabled || !model.provider.enabled || !model.provider.baseUrl) {
+          throw badRequest('指定的文本模型不可用（已停用/不存在/未配置端点）');
+        }
+        const cfg = { baseUrl: model.provider.baseUrl, apiKey: model.provider.apiKey, model: model.key };
+        textGen = async (prompt: string) =>
+          chatComplete(cfg, [{ role: 'user', content: prompt }], { jsonMode: true });
+      }
+      return createScriptChat({ textGen })(chatDb, params);
+    },
   });
   await app.register(storyboardRoutes, {
     db,

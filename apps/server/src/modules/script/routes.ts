@@ -24,13 +24,15 @@ export type EnqueueFn = (input: {
  */
 export type ScriptChatFn = (
   db: PrismaClient,
-  input: { scriptDraftId: string; baseStoryboardId: string; message: string },
+  input: { scriptDraftId: string; baseStoryboardId: string; message: string; modelConfigId?: string },
 ) => Promise<{ patch: StoryboardPatch; summary: string }>;
 
 /** 对话式剧本修改请求体（v2 §4：产出 patch 预览，前端 diff 确认后另行应用） */
 const ChatBodySchema = z.object({
   message: z.string().min(1).max(2000),
   baseStoryboardId: z.string().min(1),
+  /** 指定文本模型；缺省走按需调度 + 失效转移 */
+  modelConfigId: z.string().optional(),
 });
 
 export interface ScriptRoutesOptions {
@@ -97,6 +99,7 @@ export const scriptRoutes: FastifyPluginAsync<ScriptRoutesOptions> = async (app,
       scriptDraftId: id,
       baseStoryboardId: body.baseStoryboardId,
       message: body.message,
+      modelConfigId: body.modelConfigId,
     });
   });
 };
