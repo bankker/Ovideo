@@ -84,6 +84,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
       preset('qwen-plus', 'Qwen Plus', 'text', true),
       preset('qwen-max', 'Qwen Max', 'text', false),
       preset('qwen-flash', 'Qwen Flash', 'text', false),
+      preset('qwen-tts', 'Qwen-TTS 语音合成', 'tts', true, '配音功能的语音模型，同一把 Key 即用'),
     ],
   },
   {

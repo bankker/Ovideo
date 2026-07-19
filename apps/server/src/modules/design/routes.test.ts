@@ -96,7 +96,7 @@ describe('GET /api/tags/:id/designs', () => {
 });
 
 describe('POST /api/tags/:id/designs/generate', () => {
-  it('缺省 prompt 组装自「名，描述」，MOCK 执行器，入队参数一字不差', async () => {
+  it('缺省 prompt 组装自「名，描述」，入队参数一字不差', async () => {
     const tag = await makeTag('生成标签', '短发少女');
     const res = await app.inject({
       method: 'POST',
@@ -109,7 +109,7 @@ describe('POST /api/tags/:id/designs/generate', () => {
     expect(enqueue).toHaveBeenCalledWith({
       projectId: project.id,
       type: 'GENERATE_IMAGE',
-      executor: 'MOCK',
+      executor: 'API',
       // kind:'design' 是与 generation 执行器的跨模块契约
       inputPayload: { kind: 'design', tagId: tag.id, prompt: '生成标签，短发少女' },
     });

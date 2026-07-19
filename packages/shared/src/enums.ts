@@ -20,7 +20,8 @@ export type TakeSlot = z.infer<typeof TakeSlotSchema>;
 export const JobStatusSchema = z.enum(['QUEUED', 'RUNNING', 'SUCCEEDED', 'FAILED', 'CANCELED']);
 export type JobStatus = z.infer<typeof JobStatusSchema>;
 
-export const JobExecutorKindSchema = z.enum(['MOCK', 'API', 'GPU']);
+/** LOCAL=本地 FFmpeg 处理（拼接/放大/补帧/抽帧等）；MOCK 仅为历史任务行兼容保留，运行时不再产生 */
+export const JobExecutorKindSchema = z.enum(['LOCAL', 'API', 'GPU', 'MOCK']);
 export type JobExecutorKind = z.infer<typeof JobExecutorKindSchema>;
 
 export const JobTypeSchema = z.enum([

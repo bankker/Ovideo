@@ -249,7 +249,7 @@ export function useRemoveDesign(projectId: string) {
   });
 }
 
-/** ---------- 模型能力（选模型 Select 数据源；空列表 = 隐藏选择器走 Mock） ---------- */
+/** ---------- 模型能力（选模型 Select 数据源；未选择时走后台自动调度） ---------- */
 
 export function useCapabilities(modality: Modality) {
   return useQuery({

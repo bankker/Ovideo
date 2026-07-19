@@ -67,7 +67,7 @@ export const dubbingRoutes: FastifyPluginAsync<DubbingRoutesOptions> = async (
     const job = await enqueue({
       projectId: line.shot.storyboard.episode.projectId,
       type: 'GENERATE_TTS',
-      executor: 'MOCK',
+      executor: 'API',
       inputPayload: { kind: 'dubbing', dubbingLineId: id },
     });
     await db.dubbingLine.update({ where: { id }, data: { status: 'GENERATING' } });
@@ -111,7 +111,7 @@ export const dubbingRoutes: FastifyPluginAsync<DubbingRoutesOptions> = async (
       await enqueue({
         projectId: storyboard.episode.projectId,
         type: 'GENERATE_TTS',
-        executor: 'MOCK',
+        executor: 'API',
         inputPayload: { kind: 'dubbing', dubbingLineId: line.id },
         batchId,
       });

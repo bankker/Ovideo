@@ -33,7 +33,7 @@ export const cutRoutes: FastifyPluginAsync<CutRoutesOptions> = async (app, { db,
     const job = await enqueue({
       projectId: episode.projectId,
       type: 'COMPOSE_CUT',
-      executor: 'MOCK',
+      executor: 'LOCAL',
       inputPayload: { cutId: created.id },
     });
     reply.code(202);

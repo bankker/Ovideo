@@ -30,14 +30,14 @@ afterAll(async () => {
 });
 
 describe('enqueueJob', () => {
-  it('创建 QUEUED 任务并序列化 inputJson，默认 executor=MOCK / maxAttempts=2', async () => {
+  it('创建 QUEUED 任务并序列化 inputJson，默认 executor=LOCAL（本地处理） / maxAttempts=2', async () => {
     const job = await enqueueJob(db, {
       projectId,
       type: 'GENERATE_IMAGE',
       inputPayload: { color: 'red', n: 1 },
     });
     expect(job.status).toBe('QUEUED');
-    expect(job.executor).toBe('MOCK');
+    expect(job.executor).toBe('LOCAL');
     expect(job.attempts).toBe(0);
     expect(job.maxAttempts).toBe(2);
     expect(job.progress).toBe(0);

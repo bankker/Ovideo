@@ -55,8 +55,8 @@ describe('按需调度：候选队列', () => {
     await db.providerConfig.deleteMany({});
   });
 
-  it('自动调度模态白名单只含已有真实适配器的 text/image', () => {
-    expect(AUTO_ROUTE_MODALITIES).toEqual(['text', 'image']);
+  it('自动调度模态白名单含已有真实适配器的 text/image/tts', () => {
+    expect(AUTO_ROUTE_MODALITIES).toEqual(['text', 'image', 'tts']);
   });
 });
 

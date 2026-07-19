@@ -74,7 +74,7 @@ describe('POST /api/shots/:id/enhance', () => {
     expect(enqueue).not.toHaveBeenCalled();
   });
 
-  it('kind=upscale → 202 入队 UPSCALE / MOCK / { shotId }', async () => {
+  it('kind=upscale → 202 入队 UPSCALE / LOCAL / { shotId }', async () => {
     const { shot } = await seedShotWithSelectedVideo();
     const res = await app.inject({
       method: 'POST',
@@ -86,7 +86,7 @@ describe('POST /api/shots/:id/enhance', () => {
     const arg = enqueue.mock.calls[0]![0];
     expect(arg.projectId).toBe(projectId);
     expect(arg.type).toBe('UPSCALE');
-    expect(arg.executor).toBe('MOCK');
+    expect(arg.executor).toBe('LOCAL');
     expect(arg.inputPayload).toEqual({ shotId: shot.id });
   });
 

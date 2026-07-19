@@ -314,7 +314,7 @@ export interface ProviderTestResult {
 
 /**
  * 连通测试（厂商级，不分模态）：
- * 1. 未配 baseUrl → Mock 模式直接 ok；
+ * 1. 未配 baseUrl → ok=false（无 Mock：必须配置真实端点）；
  * 2. 先 GET /models 测连通：401/403 判鉴权失败；404/405（网关不支持列表）时若有 enabled 的
  *    文本模型则退回 chatComplete('ping') 实测，否则视为端点可达；
  * 3. 网络错误 → ok=false 带原因。
@@ -324,7 +324,7 @@ export async function testProvider(db: PrismaClient, id: string): Promise<Provid
   if (!provider) throw notFound('厂商配置');
 
   if (!provider.baseUrl) {
-    return { ok: true, message: 'Mock 模式（本地生成，无需外部连接）' };
+    return { ok: false, message: '未配置 Base URL：请填写厂商端点或用「一键接入」自动配置' };
   }
 
   const startedAt = Date.now();

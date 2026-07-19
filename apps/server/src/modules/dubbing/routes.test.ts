@@ -161,7 +161,7 @@ describe('POST /api/dubbing-lines/:id/generate', () => {
     const input = enqueue.mock.calls[0][0] as Record<string, unknown>;
     expect(input.projectId).toBe(projectId);
     expect(input.type).toBe('GENERATE_TTS');
-    expect(input.executor).toBe('MOCK');
+    expect(input.executor).toBe('API');
     expect(input.inputPayload).toEqual({ kind: 'dubbing', dubbingLineId: line.id });
 
     const after = await t.db.dubbingLine.findUniqueOrThrow({ where: { id: line.id } });
@@ -198,7 +198,7 @@ describe('POST /api/storyboards/:id/dubbing/generate-all', () => {
     const inputs = enqueue.mock.calls.map((c) => c[0] as Record<string, unknown>);
     for (const input of inputs) {
       expect(input.type).toBe('GENERATE_TTS');
-      expect(input.executor).toBe('MOCK');
+      expect(input.executor).toBe('API');
       expect(input.batchId).toBe(body.batchId); // 共享同一 batchId
       expect((input.inputPayload as Record<string, unknown>).kind).toBe('dubbing');
     }

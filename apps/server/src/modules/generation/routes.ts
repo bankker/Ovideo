@@ -61,7 +61,7 @@ export const generationRoutes: FastifyPluginAsync<GenerationRoutesOptions> = asy
     const job = await enqueue({
       projectId,
       type: 'GENERATE_IMAGE',
-      executor: modelConfigId ? 'API' : 'MOCK',
+      executor: 'API',
       inputPayload: { kind: 'keyframe', shotId: shot.id, modelConfigId },
     });
     reply.code(202);
@@ -84,7 +84,7 @@ export const generationRoutes: FastifyPluginAsync<GenerationRoutesOptions> = asy
     const job = await enqueue({
       projectId,
       type: 'GENERATE_VIDEO',
-      executor: modelConfigId ? 'API' : 'MOCK',
+      executor: 'API',
       inputPayload: { shotId: shot.id, modelConfigId },
     });
     reply.code(202);

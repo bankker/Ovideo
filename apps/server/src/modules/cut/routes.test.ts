@@ -73,7 +73,7 @@ describe('POST /api/episodes/:id/cuts', () => {
     const [input] = enqueue.mock.calls[0] as [Record<string, unknown>];
     expect(input.projectId).toBe(projectId);
     expect(input.type).toBe('COMPOSE_CUT');
-    expect(input.executor).toBe('MOCK');
+    expect(input.executor).toBe('LOCAL');
     expect(input.inputPayload).toEqual({ cutId: body.cut.id });
   });
 

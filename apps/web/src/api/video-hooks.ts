@@ -123,7 +123,7 @@ export function isGenJobFinished(status: JobStatus | undefined): boolean {
   return status !== undefined && JOB_TERMINAL.includes(status);
 }
 
-/** ---------- 能力（模型选择器数据源；空列表 = 隐藏选择器走 Mock） ---------- */
+/** ---------- 能力（模型选择器数据源；视频必须显式选择模型） ---------- */
 
 export function useCapabilities(modality: Modality) {
   return useQuery({

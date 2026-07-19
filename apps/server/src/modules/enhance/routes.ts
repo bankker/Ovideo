@@ -32,7 +32,7 @@ export const enhanceRoutes: FastifyPluginAsync<EnhanceRoutesOptions> = async (ap
       projectId: shot.storyboard.episode.projectId,
       type: kind === 'upscale' ? 'UPSCALE' : 'INTERPOLATE',
       // 本地 FFmpeg 增强挂在 MOCK 执行器类别下；接入 GPU 集群后换 'GPU'
-      executor: 'MOCK',
+      executor: 'LOCAL',
       inputPayload: { shotId: shot.id },
     });
     reply.code(202);

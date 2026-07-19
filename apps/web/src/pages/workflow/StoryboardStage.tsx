@@ -137,7 +137,7 @@ export function StoryboardStage() {
     }
   };
 
-  /* ---------- 模型选择数据源（image 能力投影；空列表隐藏走 Mock） ---------- */
+  /* ---------- 模型选择数据源（image 能力投影；未选择时自动调度） ---------- */
   const capabilitiesQuery = useCapabilities('image');
   const imageModels = capabilitiesQuery.data ?? [];
 
@@ -478,7 +478,7 @@ function ShotKeyframeCard({
               <Select
                 size="small"
                 allowClear
-                placeholder="模型（默认 Mock）"
+                placeholder="模型（默认自动调度）"
                 style={{ width: 200 }}
                 value={modelConfigId}
                 onChange={(v: string | undefined) => setModelConfigId(v)}

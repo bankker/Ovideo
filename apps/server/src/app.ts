@@ -27,8 +27,8 @@ import { libraryRoutes } from './modules/cut/library-routes.js';
 import { enqueueJob } from './modules/job/service.js';
 import { startWorker, type JobWorker } from './modules/job/worker.js';
 import { registerExecutor } from './modules/job/registry.js';
-import { createStoryboardGenerator, mockTextGen } from './modules/script/generate.js';
-import { createScriptChat, mockChatGen } from './modules/script/chat.js';
+import { createStoryboardGenerator } from './modules/script/generate.js';
+import { createScriptChat } from './modules/script/chat.js';
 import { shotGroupRoutes } from './modules/shotgroup/routes.js';
 import { enhanceRoutes } from './modules/enhance/routes.js';
 import { registerEnhanceExecutors } from './modules/enhance/executors.js';
@@ -37,7 +37,8 @@ import { openaiImageGenerate } from './modules/provider/adapters/openai-image.js
 import { arkVideoGenerate } from './modules/provider/adapters/ark-video.js';
 import { uriToAbsPath } from './lib/storage.js';
 import { registerGenerationExecutors } from './modules/generation/executors.js';
-import { mockImageGen, mockVideoGen, mockTtsGen, type ImageGen, type VideoGen, type TtsGen } from './modules/generation/gens.js';
+import type { ImageGen, VideoGen, TtsGen } from './modules/generation/gens.js';
+import { dashscopeTtsGenerate } from './modules/provider/adapters/dashscope-tts.js';
 import { registerCutExecutor } from './modules/cut/executor.js';
 import { findOrCreateTags } from './modules/tag/service.js';
 import * as stale from './modules/stale/service.js';
@@ -48,53 +49,59 @@ import type { Modality } from '@ovideo/shared';
  * 集成装配：模块间协作全部在这里接线（模块彼此不 import，见各模块 options 注释）。
  * - 失效传播（stale）注入 script/storyboard/binding 的 hooks
  * - 任务入队（job.enqueueJob）注入 script 路由
- * - 三步生成执行器按 job.input.modelConfigId 路由：有 → OpenAI 兼容适配器（真实厂商），无 → mockTextGen
+ * 【无 Mock 原则】所有生成路径只走真实模型；未配置/未选择模型时明确报错引导配置，
+ * 绝不静默产出占位内容（本地 FFmpeg 的拼接/放大/抽帧属真实本地处理，不在此列）。
  */
 export function registerExecutors(): void {
-  // 生成执行器：modelConfigId 配了真实厂商（有 baseUrl）走对应适配器，否则 FFmpeg Mock。
-  // 明确不静默降级：选了真实厂商但该模态暂无适配器时报错，避免"以为在用付费模型其实是 Mock"。
   const smartImageGen: ImageGen = async (args) => {
-    if (args.modelCfg?.baseUrl) {
-      await openaiImageGenerate(
-        { baseUrl: args.modelCfg.baseUrl, apiKey: args.modelCfg.apiKey, model: args.modelCfg.modelKey },
-        {
-          prompt: args.prompt,
-          outPath: args.outPath,
-          // 绑定/默认设计图作为参考图上送（Seedream i2i），保证角色与场景形象一致
-          refImagePaths: args.refUris.map((u) => uriToAbsPath(u)),
-        },
-      );
-      return;
+    if (!args.modelCfg?.baseUrl) {
+      throw new Error('未配置图像模型：请在管理后台「一键接入」或启用图像厂商（如火山方舟 Seedream）后重试');
     }
-    return mockImageGen(args);
+    await openaiImageGenerate(
+      { baseUrl: args.modelCfg.baseUrl, apiKey: args.modelCfg.apiKey, model: args.modelCfg.modelKey },
+      {
+        prompt: args.prompt,
+        outPath: args.outPath,
+        // 绑定/默认设计图作为参考图上送（Seedream i2i），保证角色与场景形象一致
+        refImagePaths: args.refUris.map((u) => uriToAbsPath(u)),
+      },
+    );
   };
   const smartVideoGen: VideoGen = async (args) => {
-    if (args.modelCfg?.baseUrl) {
-      // 火山方舟（Seedance/wan2）走异步任务适配器；其余厂商待接入
-      const isArk =
-        args.modelCfg.baseUrl.includes('volces.com') || /seedance|wan2/i.test(args.modelCfg.modelKey);
-      if (!isArk) {
-        throw new Error('该厂商的视频真实生成适配器尚未接入（当前支持：火山方舟 Seedance），请选择 Seedance 或 Mock 模型');
-      }
-      await arkVideoGenerate(
-        { baseUrl: args.modelCfg.baseUrl, apiKey: args.modelCfg.apiKey, model: args.modelCfg.modelKey },
-        {
-          prompt: args.prompt,
-          firstFramePath: args.firstFrameUri ? uriToAbsPath(args.firstFrameUri) : null,
-          durationMs: args.durationMs,
-          outPath: args.outPath,
-          onProgress: args.onProgress,
-        },
-      );
-      return;
+    if (!args.modelCfg?.baseUrl) {
+      throw new Error('未选择视频模型：请在视频页选择模型（当前支持火山方舟 Seedance），或在管理后台接入');
     }
-    return mockVideoGen(args);
+    // 火山方舟（Seedance/wan2）走异步任务适配器；其余厂商待接入
+    const isArk =
+      args.modelCfg.baseUrl.includes('volces.com') || /seedance|wan2/i.test(args.modelCfg.modelKey);
+    if (!isArk) {
+      throw new Error('该厂商的视频生成适配器尚未接入（当前支持：火山方舟 Seedance），请选择 Seedance 模型');
+    }
+    await arkVideoGenerate(
+      { baseUrl: args.modelCfg.baseUrl, apiKey: args.modelCfg.apiKey, model: args.modelCfg.modelKey },
+      {
+        prompt: args.prompt,
+        firstFramePath: args.firstFrameUri ? uriToAbsPath(args.firstFrameUri) : null,
+        durationMs: args.durationMs,
+        outPath: args.outPath,
+        onProgress: args.onProgress,
+      },
+    );
   };
   const smartTtsGen: TtsGen = async (args) => {
-    if (args.modelCfg?.baseUrl) {
-      throw new Error('该厂商的语音真实生成适配器将在 M3 接入，当前请使用 Mock 模型');
+    if (!args.modelCfg?.baseUrl) {
+      throw new Error('未配置语音模型：请在管理后台给阿里云百炼添加 qwen-tts 模型（同一把 Key 即用）后重试');
     }
-    return mockTtsGen(args);
+    // 阿里云百炼 Qwen-TTS（DashScope 原生 API）；其余厂商待接入
+    const isDashScope =
+      args.modelCfg.baseUrl.includes('dashscope') || /qwen-tts|sambert|cosyvoice/i.test(args.modelCfg.modelKey);
+    if (!isDashScope) {
+      throw new Error('该厂商的语音合成适配器尚未接入（当前支持：阿里云百炼 Qwen-TTS），请选择 qwen-tts 模型');
+    }
+    await dashscopeTtsGenerate(
+      { baseUrl: args.modelCfg.baseUrl, apiKey: args.modelCfg.apiKey, model: args.modelCfg.modelKey },
+      { text: args.text, speed: args.speed, voiceSeed: args.voiceSeed, outPath: args.outPath },
+    );
   };
   registerGenerationExecutors({ imageGen: smartImageGen, videoGen: smartVideoGen, ttsGen: smartTtsGen });
   registerCutExecutor();
@@ -106,8 +113,10 @@ export function registerExecutors(): void {
       {},
     );
     // 用户显式指定模型 → 只用该模型（失败即失败，不偷换）；
-    // 未指定 → 按需调度 + 失效转移（候选依次尝试，全无候选回落确定性 Mock）
-    let textGen = createFailoverTextGen(ctx.db, mockTextGen);
+    // 未指定 → 按需调度 + 失效转移；一个真实文本模型都没有 → 明确报错（无 Mock）
+    let textGen = createFailoverTextGen(ctx.db, async () => {
+      throw new Error('未配置文本模型：请在管理后台「一键接入」任一文本厂商（豆包/千问/DeepSeek…）后重试');
+    });
     if (input.modelConfigId) {
       const model = await ctx.db.modelConfig.findUnique({
         where: { id: input.modelConfigId },
@@ -125,7 +134,7 @@ export function registerExecutors(): void {
         textGen = async (prompt: string) =>
           chatComplete(cfg, [{ role: 'user', content: prompt }], { jsonMode: true });
       } else {
-        textGen = mockTextGen; // 显式选择 Mock 厂商
+        throw badRequest('该模型所属厂商未配置 Base URL，无法调用');
       }
     }
     return createStoryboardGenerator({ textGen })(ctx);
@@ -211,7 +220,9 @@ export async function buildApp(opts: BuildAppOptions = {}) {
   };
 
   // 对话式剧本：按需调度 + 失效转移（与三步生成任务共用 scheduler 的同一策略）
-  const chatTextGen = createFailoverTextGen(db, mockChatGen);
+  const chatTextGen = createFailoverTextGen(db, async () => {
+    throw new Error('未配置文本模型：请在管理后台「一键接入」任一文本厂商后再使用对话/生成功能');
+  });
 
   await app.register(scriptRoutes, {
     db,

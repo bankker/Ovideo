@@ -80,7 +80,7 @@ export function VideoStage() {
   const storyboardQuery = useStoryboardTakes(selectedStoryboardId);
   const storyboard = storyboardQuery.data;
 
-  /* ---------- 模型选择（modality=video；空列表隐藏走 Mock） ---------- */
+  /* ---------- 模型选择（modality=video；视频需显式选择模型） ---------- */
   const capsQuery = useCapabilities('video');
   const capabilities = capsQuery.data ?? [];
   const [modelConfigId, setModelConfigId] = useState<string | undefined>(undefined);
@@ -155,7 +155,7 @@ export function VideoStage() {
                 size="small"
                 style={{ width: 220 }}
                 allowClear
-                placeholder="Mock 生成（未选模型）"
+                placeholder="请选择视频模型（如 Seedance）"
                 value={modelConfigId}
                 onChange={(v: string | undefined) => setModelConfigId(v)}
                 options={capabilities.map((c) => ({

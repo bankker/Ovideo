@@ -446,7 +446,7 @@ function TagDesignCard({
               <Select
                 style={{ width: '100%' }}
                 allowClear
-                placeholder="不选则使用 Mock 生成"
+                placeholder="不选则自动调度（队首图像模型）"
                 value={genState?.modelConfigId}
                 options={imageCapabilities.map((c) => ({
                   value: c.modelConfigId,

@@ -430,7 +430,7 @@ describe('batchCreateModels 批量导入', () => {
 });
 
 describe('testProvider', () => {
-  it('baseUrl 为空：Mock 模式直接 ok（不区分厂商 category）', async () => {
+  it('baseUrl 为空：ok=false 提示配置（无 Mock）', async () => {
     const p = await createProvider(db, {
       name: 'Mock厂',
       vendor: 'openai-compatible',
@@ -440,8 +440,8 @@ describe('testProvider', () => {
       enabled: true,
     });
     const r = await testProvider(db, p.id);
-    expect(r.ok).toBe(true);
-    expect(r.message).toBe('Mock 模式（本地生成，无需外部连接）');
+    expect(r.ok).toBe(false);
+    expect(r.message).toContain('未配置 Base URL');
   });
 
   it('GET /models 成功：ok=true 返回 latencyMs（Bearer 鉴权）', async () => {

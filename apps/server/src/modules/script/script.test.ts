@@ -125,7 +125,7 @@ describe('script-draft 路由', () => {
 });
 
 describe('generate-storyboard 路由', () => {
-  it('无 modelConfigId → MOCK 执行器入队并返回 job', async () => {
+  it('无 modelConfigId → 入队（执行时自动调度）并返回 job', async () => {
     const d = await tdb.db.scriptDraft.create({
       data: { episodeId: episode.id, content: '剧本全文' },
     });
@@ -140,7 +140,7 @@ describe('generate-storyboard 路由', () => {
     expect(enqueue).toHaveBeenCalledWith({
       projectId: project.id,
       type: 'GENERATE_STORYBOARD',
-      executor: 'MOCK',
+      executor: 'API',
       inputPayload: { scriptDraftId: d.id },
     });
   });

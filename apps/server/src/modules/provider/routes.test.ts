@@ -223,7 +223,7 @@ describe('capabilities 路由', () => {
 });
 
 describe('连通测试路由', () => {
-  it('未配 baseUrl：Mock 模式 ok（不区分厂商 category）', async () => {
+  it('未配 baseUrl：ok=false 提示配置（不区分厂商 category）', async () => {
     const p = (
       await app.inject({
         method: 'POST',
@@ -233,7 +233,7 @@ describe('连通测试路由', () => {
     ).json();
     const res = await app.inject({ method: 'POST', url: `/api/admin/providers/${p.id}/test` });
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual({ ok: true, message: 'Mock 模式（本地生成，无需外部连接）' });
+    expect(res.json()).toEqual({ ok: false, message: '未配置 Base URL：请填写厂商端点或用「一键接入」自动配置' });
   });
 
   it('category 为 IMAGE 也走同一逻辑（category 已是兼容字段）', async () => {
@@ -246,7 +246,7 @@ describe('连通测试路由', () => {
     ).json();
     const res = await app.inject({ method: 'POST', url: `/api/admin/providers/${p.id}/test` });
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual({ ok: true, message: 'Mock 模式（本地生成，无需外部连接）' });
+    expect(res.json()).toEqual({ ok: false, message: '未配置 Base URL：请填写厂商端点或用「一键接入」自动配置' });
   });
 
   it('配置 baseUrl 后 GET /models 成功：连通成功且带 latencyMs', async () => {

@@ -25,7 +25,7 @@ export async function enqueueJob(db: PrismaClient, input: EnqueueJobInput): Prom
     data: {
       projectId: input.projectId,
       type: JobTypeSchema.parse(input.type),
-      executor: JobExecutorKindSchema.parse(input.executor ?? 'MOCK'),
+      executor: JobExecutorKindSchema.parse(input.executor ?? 'LOCAL'),
       inputJson: toJson(input.inputPayload ?? {}),
       providerConfigId: input.providerConfigId,
       modelKey: input.modelKey,

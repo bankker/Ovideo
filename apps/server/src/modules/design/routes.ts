@@ -47,7 +47,7 @@ export const designRoutes: FastifyPluginAsync<DesignRoutesOptions> = async (app,
     const job = await enqueue({
       projectId: tag.projectId,
       type: 'GENERATE_IMAGE',
-      executor: body.modelConfigId ? 'API' : 'MOCK',
+      executor: 'API',
       inputPayload: {
         kind: 'design',
         tagId: tag.id,

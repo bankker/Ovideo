@@ -73,7 +73,7 @@ export const scriptRoutes: FastifyPluginAsync<ScriptRoutesOptions> = async (app,
       projectId: draft.episode.projectId,
       type: 'GENERATE_STORYBOARD',
       // 指定了模型 → 走真实 API；未指定 → Mock 执行器（无 key 也能全流程跑通）
-      executor: body.modelConfigId ? 'API' : 'MOCK',
+      executor: 'API',
       inputPayload: {
         scriptDraftId: draft.id,
         ...(body.modelConfigId ? { modelConfigId: body.modelConfigId } : {}),

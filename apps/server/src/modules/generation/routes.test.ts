@@ -56,7 +56,7 @@ async function makeAsset(type = 'IMAGE') {
 }
 
 describe('POST /api/shots/:id/generate-keyframe', () => {
-  it('202 入队 GENERATE_IMAGE；无 modelConfigId 走 MOCK', async () => {
+  it('202 入队 GENERATE_IMAGE；无 modelConfigId（执行时自动调度真实模型）', async () => {
     const { shot } = await seedShot();
     const res = await app.inject({
       method: 'POST',
@@ -68,7 +68,7 @@ describe('POST /api/shots/:id/generate-keyframe', () => {
     const arg = enqueue.mock.calls[0]![0];
     expect(arg.projectId).toBe(projectId);
     expect(arg.type).toBe('GENERATE_IMAGE');
-    expect(arg.executor).toBe('MOCK');
+    expect(arg.executor).toBe('API');
     expect(arg.inputPayload).toEqual({ kind: 'keyframe', shotId: shot.id, modelConfigId: undefined });
   });
 

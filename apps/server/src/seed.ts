@@ -2,35 +2,14 @@ import 'dotenv/config';
 import { db } from './lib/db.js';
 import { toJson } from './lib/json.js';
 
-/** 幂等种子：已有数据则跳过。演示项目 + 厂商配置（Mock 可离线跑通，DeepSeek 模板待填 key 后启用）。 */
+/** 幂等种子：已有数据则跳过。演示项目 + DeepSeek 厂商模板（填 key 后启用）。
+ * 【无 Mock】平台不预置任何 Mock 厂商——用管理后台「一键接入」贴 Key 即可开始。 */
 async function main() {
   const existing = await db.providerConfig.count();
   if (existing > 0) {
     console.log('[seed] 已有数据，跳过');
     return;
   }
-
-  await db.providerConfig.create({
-    data: {
-      name: '内置 Mock（离线演示）',
-      vendor: 'mock',
-      category: 'TEXT',
-      baseUrl: '',
-      apiKey: '',
-      enabled: true,
-      models: {
-        create: [
-          {
-            key: 'mock-text',
-            label: 'Mock 文本（确定性拆分）',
-            modality: 'text',
-            capabilityJson: toJson({ modality: 'text', input: ['prompt'] }),
-            enabled: true,
-          },
-        ],
-      },
-    },
-  });
 
   await db.providerConfig.create({
     data: {
@@ -88,7 +67,7 @@ async function main() {
     },
   });
 
-  console.log(`[seed] 完成：项目「${project.name}」/ ${episode.title} / 主剧本 + 2 个文本厂商`);
+  console.log(`[seed] 完成：项目「${project.name}」/ ${episode.title} / 主剧本 + DeepSeek 厂商模板（用管理后台「一键接入」贴 Key 后即可生成）`);
 }
 
 main()
