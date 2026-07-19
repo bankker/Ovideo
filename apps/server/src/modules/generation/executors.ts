@@ -320,6 +320,28 @@ async function extractPrevSegmentTailFrame(
   return frameAsset;
 }
 
+/**
+ * 口パク（动画式对口型）：镜头里有具名说话人时返回其标签名列表（旁白不驱动口型；去重保序）。
+ * 视频提示词据此注入"正在说话，嘴部自然开合"——动画对口型只需响度级张闭循环，
+ * 时长链（视频长度≈配音长度）保证说话时段大致对齐。
+ */
+export async function listSpeakerNames(db: PrismaClient, shotId: string): Promise<string[]> {
+  const lines = await db.dialogueLine.findMany({
+    where: { shotId, isNarrator: false, speakerTagId: { not: null } },
+    orderBy: { sortOrder: 'asc' },
+  });
+  if (lines.length === 0) return [];
+  const tagIds = [...new Set(lines.map((l) => l.speakerTagId!))];
+  const tags = await db.tag.findMany({ where: { id: { in: tagIds } } });
+  const nameById = new Map(tags.map((t) => [t.id, t.name]));
+  const names: string[] = [];
+  for (const l of lines) {
+    const name = nameById.get(l.speakerTagId!);
+    if (name !== undefined && !names.includes(name)) names.push(name);
+  }
+  return names;
+}
+
 /** GENERATE_VIDEO：以选定关键图为首帧生成片段（衔接组段 1..N-1 改用上一段尾帧），实测时长 + 抽帧缩略图 */
 function makeVideoExecutor(gens: GenerationGens): JobExecutor {
   return async (ctx) => {
@@ -349,7 +371,13 @@ function makeVideoExecutor(gens: GenerationGens): JobExecutor {
 
     // 时长链路（v2 §3）：配音锁定时长优先，未锁定用计划时长
     const durationMs = shot.durationLockedMs ?? shot.durationPlannedMs;
-    const prompt = shot.videoPrompt || shot.sourceText;
+    const basePrompt = shot.videoPrompt || shot.sourceText;
+    // 口パク注入：有具名台词的镜头自动补"说话状态"（旁白镜头不注入，嘴不该动）
+    const speakers = await listSpeakerNames(db, shot.id);
+    const prompt =
+      speakers.length > 0
+        ? `${basePrompt}\n${speakers.join('、')}正在说话，嘴部自然开合，口型随台词节奏起伏`
+        : basePrompt;
     const file = allocFilePath(job.projectId, 'mp4');
     await gens.videoGen({
       prompt,
@@ -381,6 +409,8 @@ function makeVideoExecutor(gens: GenerationGens): JobExecutor {
       durationMs: actualMs,
       jobId: job.id,
       parentIds: firstFrameParentIds,
+      // 生成透明度：与关键图/设计图一致，可在前端"实际提示词"查看
+      meta: { effectivePrompt: prompt.slice(0, 2000) },
     });
     await db.asset.update({ where: { id: asset.id }, data: { thumbUri: thumbFile.uri } });
 

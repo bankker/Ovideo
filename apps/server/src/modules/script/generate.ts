@@ -40,6 +40,7 @@ export function buildStoryboardPrompt(
     stylePrompt
       ? `5. 画面风格：全剧统一为「${stylePrompt}」——imagePrompt 的风格描述必须与之一致，严禁偏离。`
       : '5. 画面风格：这是漫剧（动画短剧），imagePrompt 一律采用动漫/漫画风格（anime/manga style），严禁写 realistic style 或写实风格，除非剧本明确要求。',
+    '6. 口型（动画式对口型）：有具名角色台词的镜头，videoPrompt 必须写明说话人处于说话状态（如"@小悟 正在说话，嘴部自然开合"）；纯旁白或无台词的镜头严禁写说话状态，嘴不能动。',
     '项目已有标签词表如下，语义相同的角色/场景/道具必须复用下列同名标签，不得另造别名：',
     byType('CHARACTER', '角色'),
     byType('SCENE', '场景'),

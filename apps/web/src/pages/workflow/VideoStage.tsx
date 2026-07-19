@@ -40,6 +40,7 @@ import {
   type VideoResolution,
 } from '../../api/video-hooks';
 import { getShotGroup, useSplitGroup } from '../../api/enhance-hooks';
+import { EffectivePromptPopover } from '../../components/EffectivePromptPopover';
 
 const { Text } = Typography;
 
@@ -443,6 +444,11 @@ function VideoShotCard({
               </Tooltip>
             )}
           </div>
+          {selectedVideo !== null && (
+            <div style={{ marginTop: 6 }}>
+              <EffectivePromptPopover metaJson={selectedVideo.asset.metaJson} />
+            </div>
+          )}
 
           {/* takes 横排缩略（selected 金框，点击切换） */}
           {videoTakes.length > 0 && (

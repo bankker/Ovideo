@@ -419,6 +419,56 @@ describe('GENERATE_VIDEO', () => {
     expect(after?.videoSelectedTakeId).toBe(takeId);
     expect(after?.videoStale).toBe(false); // 原本 stale → 清除
   }, 60000);
+
+  it('口パク注入：具名台词镜头视频提示词自动补说话状态，纯旁白镜头不注入（真 ffmpeg）', async () => {
+    const prompts: string[] = [];
+    registerGenerationExecutors({
+      imageGen: mockImageGen,
+      ttsGen: mockTtsGen,
+      videoGen: async (args) => {
+        prompts.push(args.prompt);
+        await makePlaceholderVideo({ outPath: args.outPath, durationMs: 1000 });
+      },
+    });
+    const speaker = await db.tag.create({
+      data: { projectId, type: 'CHARACTER', name: `说话人-${crypto.randomUUID().slice(0, 8)}` },
+    });
+
+    const prepareShot = async (withSpeaker: boolean) => {
+      const { shot } = await seedShot();
+      const keyframeAsset = await makeUploadedAsset();
+      const take = await db.take.create({
+        data: { shotId: shot.id, slot: 'KEYFRAME', assetId: keyframeAsset.id },
+      });
+      await db.shot.update({ where: { id: shot.id }, data: { keyframeSelectedTakeId: take.id } });
+      // 两种镜头都带一条旁白（旁白绝不驱动口型）
+      await db.dialogueLine.create({
+        data: { shotId: shot.id, isNarrator: true, text: '旁白', sortOrder: 0 },
+      });
+      if (withSpeaker) {
+        await db.dialogueLine.create({
+          data: { shotId: shot.id, speakerTagId: speaker.id, text: '台词', sortOrder: 1 },
+        });
+      }
+      return shot;
+    };
+
+    const talking = await prepareShot(true);
+    await getExecutor('GENERATE_VIDEO')!(await makeCtx('GENERATE_VIDEO', { shotId: talking.id }));
+    expect(prompts[0]).toContain(`${speaker.name}正在说话，嘴部自然开合`);
+
+    const narratorOnly = await prepareShot(false);
+    await getExecutor('GENERATE_VIDEO')!(
+      await makeCtx('GENERATE_VIDEO', { shotId: narratorOnly.id }),
+    );
+    expect(prompts[1]).not.toContain('正在说话');
+
+    // 生成透明度：实际提示词落在资产 meta
+    const withMeta = await db.asset.findFirst({
+      where: { metaJson: { contains: '正在说话' } },
+    });
+    expect(withMeta).not.toBeNull();
+  }, 60000);
 });
 
 describe('GENERATE_TTS', () => {
