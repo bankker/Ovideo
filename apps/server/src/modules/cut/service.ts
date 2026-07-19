@@ -15,6 +15,17 @@ export interface CutItem {
   durationMs: number | null;
 }
 
+/** Cut.audioTracksJson 的条目：创建时快照的就绪配音行（镜头内按台词顺序，合成时从镜头起点顺序混入） */
+export interface CutAudioLine {
+  shotId: string;
+  dubbingLineId: string;
+  assetId: string;
+  uri: string;
+  durationMs: number | null;
+  /** 镜头内播放顺序（= DialogueLine.sortOrder，无关联台词行时为 0） */
+  order: number;
+}
+
 /** 对外返回形态：itemsJson 解析为 items；outputAssetId 有值时附带 outputAsset 对象 */
 export interface CutView extends Omit<Cut, 'itemsJson'> {
   items: CutItem[];
@@ -71,11 +82,34 @@ export async function createCut(db: PrismaClient, input: CreateCutInput): Promis
     };
   });
 
+  // 配音快照：各镜头 READY 且有音频资产的配音行（镜头内按台词 sortOrder 排序）。
+  // 没就绪配音的镜头不阻塞合成——只混入已有的，纯画面镜头保持静音。
+  const dubbingLines = await db.dubbingLine.findMany({
+    where: { shotId: { in: shots.map((s) => s.id) }, status: 'READY', audioAssetId: { not: null } },
+    include: { audioAsset: true, dialogueLine: true },
+  });
+  const audioLines: CutAudioLine[] = dubbingLines
+    .map((l) => ({
+      shotId: l.shotId,
+      dubbingLineId: l.id,
+      assetId: l.audioAssetId!,
+      uri: l.audioAsset!.uri,
+      durationMs: l.durationMs ?? l.audioAsset!.durationMs,
+      order: l.dialogueLine?.sortOrder ?? 0,
+    }))
+    .sort((a, b) => a.order - b.order || a.dubbingLineId.localeCompare(b.dubbingLineId));
+
   const agg = await db.cut.aggregate({ where: { episodeId }, _max: { version: true } });
   const version = (agg._max.version ?? 0) + 1;
 
   return db.cut.create({
-    data: { episodeId, version, itemsJson: toJson(items), status: 'COMPOSING' },
+    data: {
+      episodeId,
+      version,
+      itemsJson: toJson(items),
+      audioTracksJson: toJson(audioLines),
+      status: 'COMPOSING',
+    },
   });
 }
 

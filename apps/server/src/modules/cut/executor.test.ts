@@ -4,11 +4,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { Job } from '@prisma/client';
 import { createTestDb, type TestDb } from '../../test/testdb.js';
-import { makePlaceholderVideo, probeDurationMs } from '../../lib/ffmpeg.js';
+import { makePlaceholderVideo, makeSineWav, probeDurationMs, runFfmpeg } from '../../lib/ffmpeg.js';
 import { allocFilePath, fileSize, STORAGE_ROOT, uriToAbsPath } from '../../lib/storage.js';
 import { toJson } from '../../lib/json.js';
 import { clearExecutors, getExecutor } from '../job/registry.js';
-import { createCut } from './service.js';
+import { createCut, type CutAudioLine } from './service.js';
 import { composeCut, registerCutExecutor } from './executor.js';
 
 let t: TestDb;
@@ -148,4 +148,101 @@ describe('COMPOSE_CUT 执行器（真 ffmpeg）', () => {
       '成片 不存在',
     );
   });
+
+  it(
+    '配音混入：静音视频镜头 + 两条 READY 配音行 → 快照进 audioTracksJson、成片可听见声音、血缘含音频资产',
+    async () => {
+      // 独立分镜：仅一个镜头，视频无音轨（转码会补静音）——若混音失效，成片必然全程静音
+      const draft2 = await t.db.scriptDraft.create({ data: { episodeId, isMain: false } });
+      const sb2 = await t.db.storyboard.create({
+        data: { episodeId, scriptDraftId: draft2.id, version: 2 },
+      });
+      const silentVideo = allocFilePath(projectId, 'mp4');
+      await runFfmpeg([
+        '-y',
+        '-f', 'lavfi', '-i', 'color=c=seagreen:s=720x1280:d=1.2:r=24',
+        '-c:v', 'libx264', '-pix_fmt', 'yuv420p',
+        silentVideo.absPath,
+      ]);
+      const videoAsset = await t.db.asset.create({
+        data: {
+          projectId,
+          type: 'VIDEO',
+          source: 'GENERATED',
+          uri: silentVideo.uri,
+          mime: 'video/mp4',
+          sizeBytes: fileSize(silentVideo.absPath),
+          durationMs: await probeDurationMs(silentVideo.absPath),
+        },
+      });
+      const shot = await t.db.shot.create({
+        data: { storyboardId: sb2.id, sortOrder: 0, sourceText: '配音镜头' },
+      });
+      const take = await t.db.take.create({
+        data: { shotId: shot.id, slot: 'VIDEO', assetId: videoAsset.id },
+      });
+      await t.db.shot.update({ where: { id: shot.id }, data: { videoSelectedTakeId: take.id } });
+
+      // 两条台词行（sortOrder 0/1）各挂一条 READY 配音（400ms 正弦）
+      const audioAssetIds: string[] = [];
+      for (let k = 0; k < 2; k++) {
+        const wav = allocFilePath(projectId, 'wav');
+        await makeSineWav({ outPath: wav.absPath, durationMs: 400, freq: k === 0 ? 660 : 880 });
+        const audioAsset = await t.db.asset.create({
+          data: {
+            projectId,
+            type: 'AUDIO',
+            source: 'GENERATED',
+            uri: wav.uri,
+            mime: 'audio/wav',
+            sizeBytes: fileSize(wav.absPath),
+            durationMs: await probeDurationMs(wav.absPath),
+          },
+        });
+        audioAssetIds.push(audioAsset.id);
+        const dialogue = await t.db.dialogueLine.create({
+          data: { shotId: shot.id, text: `台词${k + 1}`, sortOrder: k },
+        });
+        await t.db.dubbingLine.create({
+          data: {
+            shotId: shot.id,
+            dialogueLineId: dialogue.id,
+            audioAssetId: audioAsset.id,
+            durationMs: 400,
+            status: 'READY',
+          },
+        });
+      }
+
+      const cut = await createCut(t.db, { episodeId, storyboardId: sb2.id });
+      const snapshot = JSON.parse(cut.audioTracksJson) as CutAudioLine[];
+      expect(snapshot).toHaveLength(2);
+      expect(snapshot.map((l) => l.order)).toEqual([0, 1]);
+      expect(snapshot.every((l) => l.shotId === shot.id)).toBe(true);
+
+      const job = await makeJob({ cutId: cut.id });
+      const result = await composeCut({ db: t.db, job, updateProgress: async () => {} });
+      const assetId = result.outputAssetIds?.[0];
+      expect(assetId).toBeTruthy();
+
+      // volumedetect：纯静音约 -91dB；混入正弦配音后 mean_volume 必须显著高于静音线
+      const finalAsset = await t.db.asset.findUnique({ where: { id: assetId! } });
+      const vd = await runFfmpeg([
+        '-i', uriToAbsPath(finalAsset!.uri),
+        '-map', '0:a:0',
+        '-af', 'volumedetect',
+        '-f', 'null', '-',
+      ]);
+      const mean = /mean_volume:\s*(-?[\d.]+) dB/.exec(vd);
+      expect(mean).not.toBeNull();
+      expect(parseFloat(mean![1])).toBeGreaterThan(-50);
+
+      // 血缘：parents = 视频片段 + 两条配音音频
+      const parents = await t.db.assetParent.findMany({ where: { childId: assetId! } });
+      expect(new Set(parents.map((r) => r.parentId))).toEqual(
+        new Set([videoAsset.id, ...audioAssetIds]),
+      );
+    },
+    120_000,
+  );
 });

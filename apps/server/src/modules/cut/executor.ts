@@ -1,6 +1,7 @@
-// COMPOSE_CUT 执行器：把 Cut.itemsJson 里的选定视频片段逐段转码到统一规格后
-// 用 concat demuxer 合并为 FINAL 资产（720x1280 / 24fps / H264+AAC）。
-// 铁律：血缘 parents = 全部片段资产；失败时 Cut 置 FAILED 后 rethrow（错误留给 Job 面板）。
+// COMPOSE_CUT 执行器：把 Cut.itemsJson 里的选定视频片段逐段转码到统一规格、
+// 混入该镜头的配音（audioTracksJson 快照，台词从镜头起点顺序播放），
+// 再用 concat demuxer 合并为 FINAL 资产（720x1280 / 24fps / H264+AAC）。
+// 铁律：血缘 parents = 全部片段资产 + 配音音频资产；失败时 Cut 置 FAILED 后 rethrow（错误留给 Job 面板）。
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -17,7 +18,7 @@ import {
   type JobExecutorContext,
   type JobExecutorResult,
 } from '../job/registry.js';
-import type { CutItem } from './service.js';
+import type { CutAudioLine, CutItem } from './service.js';
 
 const WIDTH = 720;
 const HEIGHT = 1280;
@@ -53,16 +54,31 @@ async function doCompose(ctx: JobExecutorContext, cut: Cut): Promise<JobExecutor
   const { db, job, updateProgress } = ctx;
   const items = parseJson<CutItem[]>(cut.itemsJson, []);
   if (items.length === 0) throw badRequest('成片没有可合成的片段');
+  // 配音快照按镜头分组（组内已按台词顺序排好）
+  const audioLines = parseJson<CutAudioLine[]>(cut.audioTracksJson, []);
+  const audioByShot = new Map<string, CutAudioLine[]>();
+  for (const line of audioLines) {
+    const list = audioByShot.get(line.shotId) ?? [];
+    list.push(line);
+    audioByShot.set(line.shotId, list);
+  }
 
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ovideo-cut-'));
   try {
-    // 1) 逐段转码到统一规格的临时文件
+    // 1) 逐段转码到统一规格的临时文件；有配音的镜头再混入台词音频
     const segPaths: string[] = [];
     for (let i = 0; i < items.length; i++) {
       const src = uriToAbsPath(items[i].uri);
       const seg = path.join(tmpDir, `seg-${String(i).padStart(3, '0')}.mp4`);
       await transcodeSegment(src, seg);
-      segPaths.push(seg);
+      const shotAudio = audioByShot.get(items[i].shotId) ?? [];
+      if (shotAudio.length > 0) {
+        const mixed = path.join(tmpDir, `seg-${String(i).padStart(3, '0')}-dub.mp4`);
+        await mixDubbing(seg, shotAudio, mixed);
+        segPaths.push(mixed);
+      } else {
+        segPaths.push(seg);
+      }
       await updateProgress(Math.round(10 + (60 * (i + 1)) / items.length));
     }
 
@@ -80,7 +96,10 @@ async function doCompose(ctx: JobExecutorContext, cut: Cut): Promise<JobExecutor
     await extractFrame({ videoPath: out.absPath, timeMs: thumbAtMs, outPath: thumb.absPath });
     await updateProgress(90);
 
-    // 4) FINAL 资产：血缘 parents = 全部片段资产（付费产物永不物理删除的溯源基础）
+    // 4) FINAL 资产：血缘 parents = 全部片段资产 + 配音音频资产（付费产物永不物理删除的溯源基础）
+    const parentIds = [
+      ...new Set([...items.map((it) => it.assetId), ...audioLines.map((l) => l.assetId)]),
+    ];
     const asset = await createAsset(db, {
       projectId: job.projectId,
       type: 'FINAL',
@@ -92,8 +111,8 @@ async function doCompose(ctx: JobExecutorContext, cut: Cut): Promise<JobExecutor
       height: HEIGHT,
       durationMs,
       jobId: job.id,
-      parentIds: items.map((it) => it.assetId),
-      meta: { cutId: cut.id, segmentCount: items.length },
+      parentIds,
+      meta: { cutId: cut.id, segmentCount: items.length, dubbedLineCount: audioLines.length },
     });
     // createAsset 不收 thumbUri（M1 冻结接口），补一笔 update
     await db.asset.update({ where: { id: asset.id }, data: { thumbUri: thumb.uri } });
@@ -128,6 +147,38 @@ async function transcodeSegment(srcPath: string, outPath: string): Promise<void>
     '-vf', VF,
     ...common,
     '-map', '0:v:0', '-map', '1:a:0', '-shortest',
+    outPath,
+  ]);
+}
+
+/**
+ * 把镜头的配音行混入转码后的片段：台词按序 concat 成整段配音，从镜头起点与
+ * 片段自身音轨（真实环境多为静音）amix。duration=first 锁定片段时长——
+ * 时长链保证视频 ≥ 配音总长，超出部分自然截断。视频流直接 copy 不二压。
+ */
+async function mixDubbing(segPath: string, lines: CutAudioLine[], outPath: string): Promise<void> {
+  const lineAbsPaths = lines.map((l) => uriToAbsPath(l.uri));
+  for (let k = 0; k < lineAbsPaths.length; k++) {
+    if (!fs.existsSync(lineAbsPaths[k])) {
+      throw badRequest(`配音音频文件不存在：${lines[k].uri}（可在配音页重新生成后再合成）`);
+    }
+  }
+  const inputs = lineAbsPaths.flatMap((p) => ['-i', p]);
+  // 各台词统一到 44100/立体声/fltp 后 concat；再与片段音轨混合（不做归一化，保配音响度）
+  const norm = lineAbsPaths
+    .map((_, k) => `[${k + 1}:a]aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo[l${k}]`)
+    .join(';');
+  const concatIn = lineAbsPaths.map((_, k) => `[l${k}]`).join('');
+  const fc =
+    `${norm};${concatIn}concat=n=${lineAbsPaths.length}:v=0:a=1[dub];` +
+    `[0:a][dub]amix=inputs=2:duration=first:normalize=0[aout]`;
+  await runFfmpeg([
+    '-y',
+    '-i', segPath,
+    ...inputs,
+    '-filter_complex', fc,
+    '-map', '0:v', '-map', '[aout]',
+    '-c:v', 'copy', '-c:a', 'aac', '-ar', '44100', '-ac', '2',
     outPath,
   ]);
 }
