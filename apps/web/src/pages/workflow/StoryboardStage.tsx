@@ -504,7 +504,7 @@ function ShotKeyframeCard({
               <Select
                 size="small"
                 allowClear
-                placeholder="模型（默认自动调度）"
+                placeholder="生图模型（自动调度）"
                 style={{ width: 200 }}
                 value={modelConfigId}
                 onChange={(v: string | undefined) => setModelConfigId(v)}
