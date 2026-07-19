@@ -82,10 +82,15 @@ async function copyShotAsIs(
   opts: { storyboardId: string; episodeId: string; base: BaseShot; sortOrder: number },
 ): Promise<void> {
   const { storyboardId, episodeId, base, sortOrder } = opts;
+  // 与 applyPatch 同规则继承 lineage；漏写会让拆分版本成为断点，跨版本抽卡历史在此断链
+  if (base.lineageId === null) {
+    await tx.shot.update({ where: { id: base.id }, data: { lineageId: base.id } });
+  }
   const created = await tx.shot.create({
     data: {
       storyboardId,
       sortOrder,
+      lineageId: base.lineageId ?? base.id,
       sourceText: base.sourceText,
       imagePrompt: base.imagePrompt,
       videoPrompt: base.videoPrompt,
@@ -169,6 +174,11 @@ export async function splitShotIntoGroup(
           continue;
         }
 
+        // 段 0 承接原镜头身份，故原镜头是存量行时先开锚（与 copyShotAsIs 同规则）
+        if (shot.lineageId === null) {
+          await tx.shot.update({ where: { id: shot.id }, data: { lineageId: shot.id } });
+        }
+
         // 目标镜头 → N 个分段（groupId = 原 shotId，天然全局唯一）
         for (let i = 0; i < n; i += 1) {
           const suffix = `（第${i + 1}段/共${n}段）`;
@@ -176,6 +186,8 @@ export async function splitShotIntoGroup(
             data: {
               storyboardId: storyboard.id,
               sortOrder,
+              // 段 0 继承原镜头 lineage（连着它的抽卡历史）；段 1..N-1 是全新镜头，建后各自开锚
+              lineageId: i === 0 ? (shot.lineageId ?? shot.id) : null,
               sourceText: shot.sourceText ? shot.sourceText + suffix : '',
               imagePrompt: shot.imagePrompt ? shot.imagePrompt + suffix : '',
               videoPrompt: shot.videoPrompt ? shot.videoPrompt + suffix : '',
@@ -203,6 +215,7 @@ export async function splitShotIntoGroup(
             },
           });
           if (i === 0) await copyTakes(tx, shot, created.id);
+          else await tx.shot.update({ where: { id: created.id }, data: { lineageId: created.id } });
           await copyShotBindings(tx, episodeId, shot.id, created.id);
           groupShotIds.push(created.id);
           sortOrder += 1;

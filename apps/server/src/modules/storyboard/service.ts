@@ -170,6 +170,8 @@ export async function applyPatch(
               dialogue: { create: buildDialogueCreates(entry.shot.dialogue, tagByName) },
             },
           });
+          // 本次新增的镜头开启一条新 lineage，以自身 id 为锚点（cuid 由库生成，故只能建后回填）
+          await tx.shot.update({ where: { id: created.id }, data: { lineageId: created.id } });
           // 新镜头是空槽（不 stale），但前端需要高亮，故记入 changed
           changedShotIds.push(created.id);
         } else {
@@ -178,6 +180,8 @@ export async function applyPatch(
             data: {
               storyboardId: storyboard.id,
               sortOrder,
+              // 继承基底的 lineage；基底是 lineageId 引入前的存量行时以其自身 id 开锚
+              lineageId: base.lineageId ?? base.id,
               sourceText: overrides.sourceText ?? base.sourceText,
               imagePrompt: overrides.imagePrompt ?? base.imagePrompt,
               videoPrompt: overrides.videoPrompt ?? base.videoPrompt,
@@ -267,6 +271,12 @@ export async function applyPatch(
                 assetId: b.assetId,
               },
             });
+          }
+
+          // 基底是 lineageId 引入前的存量行时顺手开锚：否则新行指向的 lineage 里查不到基底自己，
+          // 基底名下的历史 take 依旧不可见（正是本次要修的问题）
+          if (!base.lineageId) {
+            await tx.shot.update({ where: { id: base.id }, data: { lineageId: base.id } });
           }
 
           if (changedBaseIds.has(base.id)) changedShotIds.push(created.id);

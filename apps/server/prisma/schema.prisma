@@ -150,6 +150,10 @@ model Shot {
   durationLockedMs       Int?
   groupId                String? // ShotGroup（M3 衔接组）
   groupIndex             Int?
+  // 跨版本的"逻辑镜头"身份：applyPatch 复制出的新行继承基底的 lineageId，
+  // 使同一个镜头在 v1..vN 的所有分身可互相关联。没有它，用户在旧版本上继续抽的卡
+  // 会永远困在旧行里（新版本看不见），表现为"之前生成的图不见了"。
+  lineageId              String?
   keyframeSelectedTakeId String?
   videoSelectedTakeId    String?
   keyframeStale          Boolean @default(false)
@@ -162,6 +166,8 @@ model Shot {
   dubbingLines DubbingLine[]
   takes        Take[]
   bindings     Binding[]
+
+  @@index([lineageId])
 }
 
 model ShotTag {

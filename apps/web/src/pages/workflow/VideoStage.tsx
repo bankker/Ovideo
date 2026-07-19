@@ -29,12 +29,15 @@ import { useApplyPatch, useStoryboards } from '../../api/workflow-hooks';
 import {
   fmtSeconds,
   parseStaleReasons,
+  useAdoptKeyframe,
   useCapabilities,
   useClearStale,
   useGenJob,
   useGenerateShotVideo,
   useSelectTake,
+  useShotKeyframeTakes,
   useStoryboardTakes,
+  type ShotKeyframeTake,
   type ShotWithTakes,
   type TakeEntity,
   type VideoResolution,
@@ -283,6 +286,129 @@ export function VideoStage() {
   );
 }
 
+/** ---------- 首帧关键图选择器（跨分镜版本） ---------- */
+
+/**
+ * 版本化分镜里，旧版本上抽的关键图不会自动同步到新版本，
+ * 所以候选必须按 lineage 跨版本拉取，而不是只看当前 shot 行的 takes。
+ */
+function KeyframePicker({ shotId, active }: { shotId: string; active: boolean }) {
+  const query = useShotKeyframeTakes(active ? shotId : null);
+  const adopt = useAdoptKeyframe();
+  const takes = query.data ?? [];
+
+  if (query.isLoading) {
+    return (
+      <div style={{ width: 296, textAlign: 'center', padding: 24 }}>
+        <Spin size="small" />
+      </div>
+    );
+  }
+
+  if (query.isError) {
+    return (
+      <div style={{ maxWidth: 296 }}>
+        <Text type="danger" style={{ fontSize: 12 }}>
+          关键图加载失败：{query.error instanceof Error ? query.error.message : '未知错误'}
+        </Text>
+      </div>
+    );
+  }
+
+  if (takes.length === 0) {
+    return (
+      <div style={{ maxWidth: 296 }}>
+        <Text type="secondary" style={{ fontSize: 12 }}>
+          该镜头还没有关键图，请先在分镜阶段生成
+        </Text>
+      </div>
+    );
+  }
+
+  const handleAdopt = (t: ShotKeyframeTake) => {
+    if (t.isSelected || adopt.isPending) return;
+    adopt.mutate(
+      { shotId, assetId: t.assetId },
+      {
+        onSuccess: () => message.success('首帧已切换，重新生成视频将使用该关键图'),
+        onError: (e) => message.error(e.message),
+      },
+    );
+  };
+
+  return (
+    <div style={{ maxWidth: 296 }}>
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+        {/* 接口已按时间倒序去重返回，前端不再排序 */}
+        {takes.map((t, i) => (
+          <div key={t.takeId} style={{ position: 'relative', lineHeight: 0 }}>
+            <img
+              src={t.thumbUri ?? t.uri}
+              alt="关键图版本"
+              title={
+                t.isSelected
+                  ? '当前首帧'
+                  : t.isCurrentShot
+                    ? '点击用作首帧'
+                    : `来自 v${t.storyboardVersion}，点击取用为首帧`
+              }
+              style={{
+                width: 64,
+                height: 64,
+                objectFit: 'cover',
+                borderRadius: 4,
+                cursor: 'pointer',
+                boxSizing: 'border-box',
+                border: t.isSelected ? `2px solid ${GOLD}` : '2px solid transparent',
+                opacity: adopt.isPending ? 0.6 : 1,
+              }}
+              onClick={() => handleAdopt(t)}
+            />
+            {i === 0 && (
+              <span
+                style={{
+                  position: 'absolute',
+                  top: 2,
+                  left: 2,
+                  background: '#52c41a',
+                  color: '#fff',
+                  fontSize: 10,
+                  lineHeight: '14px',
+                  padding: '0 4px',
+                  borderRadius: 3,
+                  pointerEvents: 'none',
+                }}
+              >
+                最新
+              </span>
+            )}
+            {/* 蓝色 = 来自其他分镜版本，提示这张是"捞回来的"而非本版本产物 */}
+            <span
+              style={{
+                position: 'absolute',
+                right: 2,
+                bottom: 2,
+                fontSize: 9,
+                lineHeight: '12px',
+                padding: '0 3px',
+                borderRadius: 2,
+                background: 'rgba(255,255,255,0.85)',
+                color: t.isCurrentShot ? 'rgba(0,0,0,0.45)' : '#1677ff',
+                pointerEvents: 'none',
+              }}
+            >
+              v{t.storyboardVersion}
+            </span>
+          </div>
+        ))}
+      </div>
+      <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 6 }}>
+        按生成时间倒序，共 {takes.length} 张；含其他分镜版本抽过的关键图（蓝色版本号）
+      </Text>
+    </div>
+  );
+}
+
 /** ---------- 镜头卡片 ---------- */
 
 function VideoShotCard({
@@ -318,13 +444,13 @@ function VideoShotCard({
   const videoTakes = takes.filter((t) => t.slot === 'VIDEO');
   const selectedVideo =
     videoTakes.find((t) => t.id === shot.videoSelectedTakeId) ?? null;
-  // 首帧候选按生成时间倒序：最新抽出的关键图排在最前，避免在一排缩略图末尾被漏看
-  const keyframeTakes = takes
-    .filter((t) => t.slot === 'KEYFRAME')
-    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  // 角标只需要当前选定的那张；候选列表改由 KeyframePicker 跨版本拉取
   const selectedKeyframe =
-    keyframeTakes.find((t) => t.id === shot.keyframeSelectedTakeId) ?? null;
+    takes.find((t) => t.slot === 'KEYFRAME' && t.id === shot.keyframeSelectedTakeId) ?? null;
   const hasKeyframe = selectedKeyframe !== null;
+
+  /** 受控开关：关闭时让跨版本候选查询 disabled，避免每张卡片常驻请求 */
+  const [keyframePickerOpen, setKeyframePickerOpen] = useState(false);
 
   /* 切换选定 take */
   const selectTake = useSelectTake();
@@ -473,7 +599,7 @@ function VideoShotCard({
                         textAlign: 'center',
                       }}
                     >
-                      {isChained ? '上一段尾帧' : `首帧 ${keyframeTakes.length > 1 ? '▾' : ''}`}
+                      {isChained ? '上一段尾帧' : '首帧 ▾'}
                     </div>
                   </div>
                 );
@@ -484,78 +610,21 @@ function VideoShotCard({
                   <Popover
                     trigger="click"
                     placement="rightTop"
-                    title="选择首帧关键图（本镜头的抽卡版本）"
+                    title="选择首帧关键图（跨分镜版本）"
+                    open={keyframePickerOpen}
                     // 打开即拉最新：分镜页刚抽出的关键图可能还没同步到本页缓存
                     onOpenChange={(open) => {
+                      setKeyframePickerOpen(open);
                       if (!open) return;
                       void qc.invalidateQueries({ queryKey: ['storyboard', storyboardId] });
                       void qc.invalidateQueries({ queryKey: ['storyboards', episodeId] });
                     }}
                     content={
-                      <div style={{ maxWidth: 296 }}>
-                        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                          {keyframeTakes.map((t, i) => {
-                            const isSel = t.id === shot.keyframeSelectedTakeId;
-                            const isNewest = i === 0;
-                            return (
-                              <div key={t.id} style={{ position: 'relative', lineHeight: 0 }}>
-                                <img
-                                  src={t.asset.thumbUri ?? t.asset.uri}
-                                  alt="关键图版本"
-                                  title={isSel ? '当前首帧' : '点击用作首帧'}
-                                  style={{
-                                    width: 64,
-                                    height: 64,
-                                    objectFit: 'cover',
-                                    borderRadius: 4,
-                                    cursor: 'pointer',
-                                    boxSizing: 'border-box',
-                                    border: isSel ? '2px solid #faad14' : '2px solid transparent',
-                                    opacity: selectTake.isPending ? 0.6 : 1,
-                                  }}
-                                  onClick={() => {
-                                    if (isSel || selectTake.isPending) return;
-                                    selectTake.mutate(
-                                      {
-                                        shotId: shot.id,
-                                        slot: 'KEYFRAME',
-                                        takeId: t.id,
-                                        storyboardId,
-                                      },
-                                      {
-                                        onSuccess: () =>
-                                          message.success('首帧已切换，重新生成视频将使用该关键图'),
-                                        onError: (e) => message.error(e.message),
-                                      },
-                                    );
-                                  }}
-                                />
-                                {isNewest && (
-                                  <span
-                                    style={{
-                                      position: 'absolute',
-                                      top: 2,
-                                      left: 2,
-                                      background: '#52c41a',
-                                      color: '#fff',
-                                      fontSize: 10,
-                                      lineHeight: '14px',
-                                      padding: '0 4px',
-                                      borderRadius: 3,
-                                      pointerEvents: 'none',
-                                    }}
-                                  >
-                                    最新
-                                  </span>
-                                )}
-                              </div>
-                            );
-                          })}
-                        </div>
-                        <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 6 }}>
-                          按生成时间倒序，共 {keyframeTakes.length} 张；若刚在分镜页抽卡，重开此面板即可刷新
-                        </Text>
-                      </div>
+                      <KeyframePicker
+                        shotId={shot.id}
+                        // 关闭时置 null 让查询 disabled，下次打开重新拉取
+                        active={keyframePickerOpen}
+                      />
                     }
                   >
                     {badge}

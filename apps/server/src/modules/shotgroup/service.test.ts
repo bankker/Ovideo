@@ -213,6 +213,40 @@ describe('splitShotIntoGroup（拆分 = 新版本复制）', () => {
     expect(segs.map((s) => s.durationLockedMs)).toEqual([12000, 12000]);
   });
 
+  it('lineage 不断链：段 0 继承目标镜头 lineage，其余段各自开锚，旁镜头沿用原 lineage', async () => {
+    const { storyboard } = await seedStoryboard();
+    // 存量行（lineageId 为 null）也要能在拆分时被开锚，否则跨版本抽卡历史断在这里
+    const target = await db.shot.create({
+      data: { storyboardId: storyboard.id, sortOrder: 0, sourceText: '待拆', durationPlannedMs: 24000 },
+    });
+    const bystander = await db.shot.create({
+      data: { storyboardId: storyboard.id, sortOrder: 1, sourceText: '旁观', durationPlannedMs: 8000 },
+    });
+
+    const result = await splitShotIntoGroup(db, { shotId: target.id });
+    const newShots = await db.shot.findMany({
+      where: { storyboardId: result.storyboard.id },
+      orderBy: { sortOrder: 'asc' },
+    });
+
+    // 原行被开锚为自身 id
+    const targetAfter = await db.shot.findUnique({ where: { id: target.id } });
+    const bystanderAfter = await db.shot.findUnique({ where: { id: bystander.id } });
+    expect(targetAfter?.lineageId).toBe(target.id);
+    expect(bystanderAfter?.lineageId).toBe(bystander.id);
+
+    const segs = newShots.filter((s) => s.groupId === target.id);
+    expect(segs).toHaveLength(2);
+    // 段 0 连着原镜头的抽卡历史；段 1 是全新镜头，自成 lineage
+    expect(segs[0].lineageId).toBe(target.id);
+    expect(segs[1].lineageId).toBe(segs[1].id);
+    // 旁镜头照常继承，不因拆分断链
+    const copiedBystander = newShots.find((s) => s.sourceText === '旁观');
+    expect(copiedBystander?.lineageId).toBe(bystander.id);
+    // 全部新行都有 lineageId（null 即断点）
+    expect(newShots.every((s) => s.lineageId !== null)).toBe(true);
+  });
+
   it('maxSegmentMs 可自定义；时长未超上限 → 400 固定文案', async () => {
     const { storyboard } = await seedStoryboard();
     const shot = await db.shot.create({

@@ -318,3 +318,174 @@ describe('GET /api/storyboards/:id/resolved-bindings', () => {
     expect(res.statusCode).toBe(404);
   });
 });
+
+/**
+ * 造一个"同一逻辑镜头跨两个分镜版本"的场景：v1 的旧行与 v2 的当前行共享 lineageId。
+ * 这正是缺陷现场——用户在 v1 上抽的卡落在旧行，v2 里看不见。
+ */
+async function seedLineage() {
+  const episode = await db.episode.create({ data: { projectId, title: '跨版本测试集' } });
+  const draft = await db.scriptDraft.create({ data: { episodeId: episode.id, isMain: true } });
+  const sb1 = await db.storyboard.create({
+    data: { episodeId: episode.id, scriptDraftId: draft.id, version: 1 },
+  });
+  const oldShot = await db.shot.create({
+    data: { storyboardId: sb1.id, sortOrder: 0, sourceText: '镜头' },
+  });
+  await db.shot.update({ where: { id: oldShot.id }, data: { lineageId: oldShot.id } });
+  const sb2 = await db.storyboard.create({
+    data: { episodeId: episode.id, scriptDraftId: draft.id, version: 2 },
+  });
+  const currentShot = await db.shot.create({
+    data: { storyboardId: sb2.id, sortOrder: 0, sourceText: '镜头', lineageId: oldShot.id },
+  });
+  return { episode, oldShot, currentShot };
+}
+
+/** createdAt 显式给定：SQLite 毫秒精度下连续插入可能同刻，倒序断言需要确定的先后 */
+async function makeKeyframeTake(shotId: string, assetId: string, createdAt: Date, jobId?: string) {
+  return db.take.create({ data: { shotId, slot: 'KEYFRAME', assetId, jobId, createdAt } });
+}
+
+describe('GET /api/shots/:id/keyframe-takes', () => {
+  it('合并 lineage 内所有版本的关键图，按时间倒序，标记 isCurrentShot / isSelected', async () => {
+    const { oldShot, currentShot } = await seedLineage();
+    const assetOld = await makeAsset();
+    const assetNew = await makeAsset();
+    const takeOld = await makeKeyframeTake(oldShot.id, assetOld.id, new Date('2026-01-01T00:00:00Z'));
+    const takeNew = await makeKeyframeTake(
+      currentShot.id,
+      assetNew.id,
+      new Date('2026-02-01T00:00:00Z'),
+    );
+    await db.shot.update({
+      where: { id: currentShot.id },
+      data: { keyframeSelectedTakeId: takeNew.id },
+    });
+
+    const res = await app.inject({ method: 'GET', url: `/api/shots/${currentShot.id}/keyframe-takes` });
+    expect(res.statusCode).toBe(200);
+    const { takes } = res.json() as { takes: Array<Record<string, unknown>> };
+
+    expect(takes).toHaveLength(2);
+    expect(takes[0]).toMatchObject({
+      takeId: takeNew.id,
+      assetId: assetNew.id,
+      uri: assetNew.uri,
+      storyboardVersion: 2,
+      isCurrentShot: true,
+      isSelected: true,
+    });
+    // 旧版本上抽的卡照样列出来——这就是"图不见了"的修复点
+    expect(takes[1]).toMatchObject({
+      takeId: takeOld.id,
+      assetId: assetOld.id,
+      storyboardVersion: 1,
+      isCurrentShot: false,
+      isSelected: false,
+    });
+  });
+
+  it('同一资产在多个版本各有 take 行时只回一条，且代表条落在当前 shot 上', async () => {
+    const { oldShot, currentShot } = await seedLineage();
+    const asset = await makeAsset();
+    await makeKeyframeTake(oldShot.id, asset.id, new Date('2026-01-01T00:00:00Z'));
+    // 复制版本时产生的同资产新行（createdAt 更晚）
+    const copied = await makeKeyframeTake(currentShot.id, asset.id, new Date('2026-01-02T00:00:00Z'));
+
+    const res = await app.inject({ method: 'GET', url: `/api/shots/${currentShot.id}/keyframe-takes` });
+    const { takes } = res.json() as { takes: Array<Record<string, unknown>> };
+    expect(takes).toHaveLength(1);
+    expect(takes[0]).toMatchObject({ takeId: copied.id, isCurrentShot: true });
+  });
+
+  it('lineageId 为空的存量镜头退化为只看自身', async () => {
+    const { shot } = await seedShot();
+    const asset = await makeAsset();
+    const take = await makeKeyframeTake(shot.id, asset.id, new Date('2026-03-01T00:00:00Z'));
+    const res = await app.inject({ method: 'GET', url: `/api/shots/${shot.id}/keyframe-takes` });
+    const { takes } = res.json() as { takes: Array<{ takeId: string }> };
+    expect(takes.map((t) => t.takeId)).toEqual([take.id]);
+  });
+
+  it('镜头不存在 404', async () => {
+    const res = await app.inject({ method: 'GET', url: '/api/shots/no-such/keyframe-takes' });
+    expect(res.statusCode).toBe(404);
+  });
+});
+
+describe('POST /api/shots/:id/adopt-keyframe', () => {
+  it('取用历史版本关键图：当前 shot 新增 take 并选定，旧 take 原样保留', async () => {
+    const { oldShot, currentShot } = await seedLineage();
+    const asset = await makeAsset();
+    const oldTake = await makeKeyframeTake(
+      oldShot.id,
+      asset.id,
+      new Date('2026-01-01T00:00:00Z'),
+      'job-历史',
+    );
+
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/shots/${currentShot.id}/adopt-keyframe`,
+      payload: { assetId: asset.id },
+    });
+    expect(res.statusCode).toBe(200);
+    const { takeId } = res.json() as { takeId: string };
+
+    const take = await db.take.findUniqueOrThrow({ where: { id: takeId } });
+    expect(take.shotId).toBe(currentShot.id);
+    expect(take.assetId).toBe(asset.id);
+    expect(take.slot).toBe('KEYFRAME');
+    expect(take.jobId).toBe('job-历史'); // 沿用来源 take 的溯源
+
+    const after = await db.shot.findUniqueOrThrow({ where: { id: currentShot.id } });
+    expect(after.keyframeSelectedTakeId).toBe(takeId);
+    // 铁律：付费产物永不物理删除
+    expect(await db.take.findUnique({ where: { id: oldTake.id } })).not.toBeNull();
+  });
+
+  it('重复取用同一资产不重复建 take', async () => {
+    const { oldShot, currentShot } = await seedLineage();
+    const asset = await makeAsset();
+    await makeKeyframeTake(oldShot.id, asset.id, new Date('2026-01-01T00:00:00Z'));
+
+    const first = await app.inject({
+      method: 'POST',
+      url: `/api/shots/${currentShot.id}/adopt-keyframe`,
+      payload: { assetId: asset.id },
+    });
+    const second = await app.inject({
+      method: 'POST',
+      url: `/api/shots/${currentShot.id}/adopt-keyframe`,
+      payload: { assetId: asset.id },
+    });
+    expect((second.json() as { takeId: string }).takeId).toBe(
+      (first.json() as { takeId: string }).takeId,
+    );
+    expect(await db.take.count({ where: { shotId: currentShot.id } })).toBe(1);
+  });
+
+  it('非本 lineage 的资产 400', async () => {
+    const { currentShot } = await seedLineage();
+    const { shot: strangerShot } = await seedShot();
+    const asset = await makeAsset();
+    await makeKeyframeTake(strangerShot.id, asset.id, new Date('2026-01-01T00:00:00Z'));
+
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/shots/${currentShot.id}/adopt-keyframe`,
+      payload: { assetId: asset.id },
+    });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it('镜头不存在 404', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/shots/no-such/adopt-keyframe',
+      payload: { assetId: 'x' },
+    });
+    expect(res.statusCode).toBe(404);
+  });
+});

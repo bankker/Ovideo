@@ -501,3 +501,81 @@ describe('applyPatch：版本、事务与钩子', () => {
     expect(onStoryboardPatched).toHaveBeenCalledWith(expect.anything(), v2.storyboard.id, [], [asset.id]);
   });
 });
+
+describe('applyPatch：跨版本镜头身份 lineageId', () => {
+  it('新增镜头以自身 id 开锚，复制镜头继承基底 lineage', async () => {
+    const { ep, dr } = await freshEpisode();
+    const base = { episodeId: ep.id, scriptDraftId: dr.id };
+    const v1 = await apply({ ...base, patch: [{ op: 'add_shot', shot: makeShot('A') }] });
+    const [a1] = await loadShots(v1.storyboard.id);
+    expect(a1.lineageId).toBe(a1.id);
+
+    const v2 = await apply({
+      ...base,
+      baseStoryboardId: v1.storyboard.id,
+      patch: [{ op: 'add_shot', shot: makeShot('B') }],
+    });
+    const [a2, b2] = await loadShots(v2.storyboard.id);
+    expect(a2.id).not.toBe(a1.id);
+    expect(a2.lineageId).toBe(a1.lineageId);
+    // 本次新增的 B 是一条独立的新 lineage
+    expect(b2.lineageId).toBe(b2.id);
+    expect(b2.lineageId).not.toBe(a2.lineageId);
+  });
+
+  it('多次 patch（含改写与重排）后同一逻辑镜头的 lineageId 保持不变', async () => {
+    const { ep, dr } = await freshEpisode();
+    const base = { episodeId: ep.id, scriptDraftId: dr.id };
+    const v1 = await apply({
+      ...base,
+      patch: [
+        { op: 'add_shot', shot: makeShot('A') },
+        { op: 'add_shot', shot: makeShot('B') },
+      ],
+    });
+    const [a1, b1] = await loadShots(v1.storyboard.id);
+
+    const v2 = await apply({
+      ...base,
+      baseStoryboardId: v1.storyboard.id,
+      patch: [{ op: 'update_shot', shotId: a1.id, fields: { imagePrompt: '改过的画面' } }],
+    });
+    const [a2, b2] = await loadShots(v2.storyboard.id);
+
+    // 重排不改变身份：lineage 跟着镜头走，而不是跟着位置走
+    const v3 = await apply({
+      ...base,
+      baseStoryboardId: v2.storyboard.id,
+      patch: [{ op: 'reorder', shotIds: [b2.id, a2.id] }],
+    });
+    const [firstV3, secondV3] = await loadShots(v3.storyboard.id);
+
+    expect(a2.lineageId).toBe(a1.id);
+    expect(b2.lineageId).toBe(b1.id);
+    expect(firstV3.lineageId).toBe(b1.id);
+    expect(secondV3.lineageId).toBe(a1.id);
+  });
+
+  it('基底是 lineageId 引入前的存量行时，基底与新行一起归入以基底 id 为锚的 lineage', async () => {
+    const { ep, dr } = await freshEpisode();
+    const legacySb = await tdb.db.storyboard.create({
+      data: { episodeId: ep.id, scriptDraftId: dr.id, version: 1 },
+    });
+    const legacyShot = await tdb.db.shot.create({
+      data: { storyboardId: legacySb.id, sortOrder: 0, sourceText: '存量镜头' },
+    });
+    expect(legacyShot.lineageId).toBeNull();
+
+    const v2 = await apply({
+      episodeId: ep.id,
+      scriptDraftId: dr.id,
+      baseStoryboardId: legacySb.id,
+      patch: [],
+    });
+    const [copied] = await loadShots(v2.storyboard.id);
+    const legacyAfter = await tdb.db.shot.findUniqueOrThrow({ where: { id: legacyShot.id } });
+
+    expect(copied.lineageId).toBe(legacyShot.id);
+    expect(legacyAfter.lineageId).toBe(legacyShot.id);
+  });
+});

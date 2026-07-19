@@ -26,6 +26,10 @@ const ClearStaleBodySchema = z.object({
   mode: z.enum(['regenerated', 'ignored']),
 });
 
+const AdoptKeyframeBodySchema = z.object({
+  assetId: z.string(),
+});
+
 export interface GenerationRoutesOptions {
   db: PrismaClient;
   /** 入队函数（集成阶段注入 job 模块的 enqueueJob 绑定 db 的偏函数） */
@@ -44,6 +48,19 @@ export interface ResolvedBindingCell {
     /** shot=镜头级覆盖 > tag=标签级默认绑定 > design=默认设计图回落（与生成实际取用一致） */
     level: 'shot' | 'tag' | 'design';
   };
+}
+
+/** 关键图选择器的一条候选：同一逻辑镜头在任意分镜版本里抽过的图 */
+export interface KeyframeTakeItem {
+  takeId: string;
+  assetId: string;
+  uri: string;
+  thumbUri: string | null;
+  createdAt: string;
+  storyboardVersion: number;
+  /** 该 take 是否就挂在当前这个 shot 行上（前端据此区分"本版本已有"与"历史版本可取用"） */
+  isCurrentShot: boolean;
+  isSelected: boolean;
 }
 
 export const generationRoutes: FastifyPluginAsync<GenerationRoutesOptions> = async (app, opts) => {
@@ -119,6 +136,84 @@ export const generationRoutes: FastifyPluginAsync<GenerationRoutesOptions> = asy
     if (!shot) throw notFound('镜头');
     await clearStale(db, shot.id, slot, mode);
     return db.shot.findUnique({ where: { id: shot.id } });
+  });
+
+  /**
+   * 取同一逻辑镜头（lineage）在所有分镜版本里的全部 KEYFRAME take。
+   * 分镜是版本化的：applyPatch 只在"建新版本那一刻"复制 take，此后用户若在旧版本上继续抽卡，
+   * 新 take 就落在旧行上、在更新的版本里再也看不到。按 lineage 横向查回来即可修复。
+   * lineageId 为空（回填脚本未覆盖到的存量行）时退化为只看当前 shot，不至于报错。
+   */
+  async function loadLineageKeyframeTakes(shot: { id: string; lineageId: string | null }) {
+    const shotIds = shot.lineageId
+      ? (await db.shot.findMany({ where: { lineageId: shot.lineageId }, select: { id: true } })).map(
+          (s) => s.id,
+        )
+      : [shot.id];
+    return db.take.findMany({
+      where: { shotId: { in: shotIds }, slot: 'KEYFRAME' },
+      include: { asset: true, shot: { include: { storyboard: true } } },
+      orderBy: { createdAt: 'desc' },
+    });
+  }
+
+  app.get<{ Params: { id: string } }>('/api/shots/:id/keyframe-takes', async (req) => {
+    const shot = await db.shot.findUnique({ where: { id: req.params.id } });
+    if (!shot) throw notFound('镜头');
+    const takes = await loadLineageKeyframeTakes(shot);
+
+    // 同一张图在多个版本里都有 take 行（复制产生），只回一条。
+    // 代表条优先级：当前选定的那条 > 挂在当前 shot 上的 > 其他版本的。
+    // 选定条若被挤掉，前端 isSelected 全为 false，金框会凭空消失。
+    const rank = (t: (typeof takes)[number]) =>
+      t.id === shot.keyframeSelectedTakeId ? 2 : t.shotId === shot.id ? 1 : 0;
+    const byAsset = new Map<string, (typeof takes)[number]>();
+    for (const take of takes) {
+      const kept = byAsset.get(take.assetId);
+      if (!kept || rank(take) > rank(kept)) byAsset.set(take.assetId, take);
+    }
+
+    const items: KeyframeTakeItem[] = [...byAsset.values()]
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+      .map((take) => ({
+        takeId: take.id,
+        assetId: take.assetId,
+        uri: take.asset.uri,
+        thumbUri: take.asset.thumbUri,
+        createdAt: take.createdAt.toISOString(),
+        storyboardVersion: take.shot.storyboard.version,
+        isCurrentShot: take.shotId === shot.id,
+        isSelected: take.id === shot.keyframeSelectedTakeId,
+      }));
+    return { takes: items };
+  });
+
+  // 把历史版本抽过的关键图"取用"为当前镜头的首帧：在当前 shot 行补一条指向同资产的 take 并选定它。
+  // 不动任何既有 take —— 付费产物永不删除，历史版本保持可回滚。
+  app.post<{ Params: { id: string } }>('/api/shots/:id/adopt-keyframe', async (req) => {
+    const { assetId } = AdoptKeyframeBodySchema.parse(req.body);
+    const shot = await db.shot.findUnique({ where: { id: req.params.id } });
+    if (!shot) throw notFound('镜头');
+
+    const takes = await loadLineageKeyframeTakes(shot);
+    const source = takes.find((t) => t.assetId === assetId);
+    if (!source) throw badRequest('该关键图不属于本镜头的历史版本');
+
+    // 当前行可能已被复制过同一张图，复用它而非重复建行
+    const existing = takes.find((t) => t.assetId === assetId && t.shotId === shot.id);
+    const take =
+      existing ??
+      (await db.take.create({
+        data: { shotId: shot.id, slot: 'KEYFRAME', assetId, jobId: source.jobId },
+      }));
+
+    if (shot.keyframeSelectedTakeId !== take.id) {
+      await db.shot.update({ where: { id: shot.id }, data: { keyframeSelectedTakeId: take.id } });
+      // 与手动选定走同一套失效传播：首帧换了，据旧首帧生成的视频即失效。
+      // 反复取用同一张时不进这里，避免凭空把视频标脏。
+      await onTakeSelected(db, shot.id, 'KEYFRAME');
+    }
+    return { takeId: take.id };
   });
 
   app.get<{ Params: { id: string } }>('/api/episodes/:id/stale-shots', async (req) => {

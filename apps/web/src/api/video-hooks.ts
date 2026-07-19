@@ -178,6 +178,58 @@ export function useSelectTake() {
   });
 }
 
+/** ---------- 跨版本关键图（lineage） ---------- */
+
+/** 同一逻辑镜头（lineage）在所有分镜版本里抽过的关键图候选项 */
+export interface ShotKeyframeTake {
+  takeId: string;
+  assetId: string;
+  uri: string;
+  thumbUri: string | null;
+  createdAt: string;
+  /** 该 take 所属分镜版本号，用于标注来源 */
+  storyboardVersion: number;
+  /** false = 来自其他分镜版本（取用后才会落到当前 shot 行） */
+  isCurrentShot: boolean;
+  isSelected: boolean;
+}
+
+interface ShotKeyframeTakesResponse {
+  takes: ShotKeyframeTake[];
+}
+
+/**
+ * 拉取该镜头 lineage 在所有分镜版本中的关键图。
+ * 服务端已按时间倒序去重，调用方不要再排序，否则会和「最新」角标语义打架。
+ */
+export function useShotKeyframeTakes(shotId: string | null) {
+  return useQuery({
+    queryKey: ['shot-keyframe-takes', shotId ?? ''],
+    queryFn: () => api<ShotKeyframeTakesResponse>(`/shots/${shotId}/keyframe-takes`),
+    enabled: shotId !== null,
+    select: (data) => data.takes,
+  });
+}
+
+/**
+ * 把历史版本的关键图取用为当前镜头首帧。
+ * 服务端保证幂等（已有同 asset 的 take 则复用），前端无需区分是否本版本。
+ */
+export function useAdoptKeyframe() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ shotId, assetId }: { shotId: string; assetId: string }) =>
+      api<{ takeId: string }>(`/shots/${shotId}/adopt-keyframe`, {
+        method: 'POST',
+        body: { assetId },
+      }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['shot-keyframe-takes'] });
+      void qc.invalidateQueries({ queryKey: ['storyboard'] });
+    },
+  });
+}
+
 /** 消除失效角标（mode: 'ignored' = 用户确认忽略上游变更） */
 export function useClearStale() {
   const qc = useQueryClient();
