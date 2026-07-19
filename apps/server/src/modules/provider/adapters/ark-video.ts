@@ -26,9 +26,12 @@ export interface ArkVideoArgs {
   timeoutMs?: number;
 }
 
-/** Seedance 单次生成支持 5s / 10s，把镜头时长映射到最近档位 */
+/**
+ * Seedance 单次生成支持 5s / 10s——一律向上取档：超过 5s 的镜头（哪怕 5.1s）都用 10s，
+ * 宁可多生成再由合成阶段按配音时长精确裁剪，也绝不让视频短于配音导致台词被截断。
+ */
 export function mapSeedanceDurationS(durationMs: number): 5 | 10 {
-  return durationMs / 1000 <= 7 ? 5 : 10;
+  return durationMs <= 5000 ? 5 : 10;
 }
 
 function toDataUrl(filePath: string): string {

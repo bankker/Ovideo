@@ -150,6 +150,74 @@ describe('COMPOSE_CUT 执行器（真 ffmpeg）', () => {
   });
 
   it(
+    '配音时间轴精确对齐：视频过长按台词裁剪，过短末帧定格补足（头 200ms + 行间 300ms + 尾 500ms）',
+    async () => {
+      const mkShot = async (videoMs: number, lineMs: number[], version: number) => {
+        const draft = await t.db.scriptDraft.create({ data: { episodeId, isMain: false } });
+        const sb = await t.db.storyboard.create({
+          data: { episodeId, scriptDraftId: draft.id, version },
+        });
+        const vid = allocFilePath(projectId, 'mp4');
+        await makePlaceholderVideo({ outPath: vid.absPath, durationMs: videoMs });
+        const videoAsset = await t.db.asset.create({
+          data: {
+            projectId, type: 'VIDEO', source: 'GENERATED', uri: vid.uri, mime: 'video/mp4',
+            sizeBytes: fileSize(vid.absPath), durationMs: await probeDurationMs(vid.absPath),
+          },
+        });
+        const shot = await t.db.shot.create({
+          data: { storyboardId: sb.id, sortOrder: 0, sourceText: '对齐镜头' },
+        });
+        const take = await t.db.take.create({
+          data: { shotId: shot.id, slot: 'VIDEO', assetId: videoAsset.id },
+        });
+        await t.db.shot.update({ where: { id: shot.id }, data: { videoSelectedTakeId: take.id } });
+        for (let k = 0; k < lineMs.length; k++) {
+          const wav = allocFilePath(projectId, 'wav');
+          await makeSineWav({ outPath: wav.absPath, durationMs: lineMs[k], freq: 700 });
+          const audioAsset = await t.db.asset.create({
+            data: {
+              projectId, type: 'AUDIO', source: 'GENERATED', uri: wav.uri, mime: 'audio/wav',
+              sizeBytes: fileSize(wav.absPath), durationMs: lineMs[k],
+            },
+          });
+          const dlg = await t.db.dialogueLine.create({
+            data: { shotId: shot.id, text: `L${k}`, sortOrder: k },
+          });
+          await t.db.dubbingLine.create({
+            data: {
+              shotId: shot.id, dialogueLineId: dlg.id, audioAssetId: audioAsset.id,
+              durationMs: lineMs[k], status: 'READY',
+            },
+          });
+        }
+        return sb.id;
+      };
+
+      const composeAndProbe = async (storyboardId: string) => {
+        const cut = await createCut(t.db, { episodeId, storyboardId });
+        const job = await makeJob({ cutId: cut.id });
+        const r = await composeCut({ db: t.db, job, updateProgress: async () => {} });
+        const asset = await t.db.asset.findUnique({ where: { id: r.outputAssetIds![0] } });
+        return asset!.durationMs!;
+      };
+
+      // 过长：5s 视频 + 1s 台词 → 目标 200+1000+500=1700ms，多余画面裁掉
+      const longSb = await mkShot(5000, [1000], 10);
+      const trimmed = await composeAndProbe(longSb);
+      expect(trimmed).toBeGreaterThan(1450);
+      expect(trimmed).toBeLessThan(2000);
+
+      // 过短：1s 视频 + 两句 1s 台词 → 目标 200+1000+300+1000+500=3000ms，末帧定格补足
+      const shortSb = await mkShot(1000, [1000, 1000], 11);
+      const extended = await composeAndProbe(shortSb);
+      expect(extended).toBeGreaterThan(2750);
+      expect(extended).toBeLessThan(3300);
+    },
+    120_000,
+  );
+
+  it(
     '画幅自适应：横屏片段 AUTO 合成 → 成片保持横屏；显式 9:16 → 强制竖屏画布',
     async () => {
       const draft4 = await t.db.scriptDraft.create({ data: { episodeId, isMain: false } });

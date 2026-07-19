@@ -13,8 +13,10 @@ const tmpOut = () => path.join(os.tmpdir(), `ark-video-test-${Date.now()}-${Math
 describe('mapSeedanceDurationS', () => {
   it('≤7s 映射 5s，其余映射 10s', () => {
     expect(mapSeedanceDurationS(4000)).toBe(5);
-    expect(mapSeedanceDurationS(7000)).toBe(5);
-    expect(mapSeedanceDurationS(7100)).toBe(10);
+    expect(mapSeedanceDurationS(5000)).toBe(5);
+    // 超过 5s 一律向上取 10s：视频只能长不能短，超出部分由合成阶段按配音裁剪
+    expect(mapSeedanceDurationS(5100)).toBe(10);
+    expect(mapSeedanceDurationS(7000)).toBe(10);
     expect(mapSeedanceDurationS(15000)).toBe(10);
   });
 });

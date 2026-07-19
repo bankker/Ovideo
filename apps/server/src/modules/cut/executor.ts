@@ -42,6 +42,24 @@ const RATIO_CANVAS: Record<string, { width: number; height: number }> = {
 /** AUTO 兜底画布（首片段探测失败时） */
 const FALLBACK_CANVAS = { width: 720, height: 1280 };
 
+/**
+ * 配音时间轴常量：与时长链一致（TTS 锁定时长 = Σ行时长 + 行间 300ms 间隔）。
+ * HEAD_PAD 让台词不顶着切镜开口，TAIL_PAD 让尾句说完再切镜。
+ */
+const LINE_GAP_MS = 300;
+const HEAD_PAD_MS = 200;
+const TAIL_PAD_MS = 500;
+
+/** 镜头配音时间轴总长（含头尾留白）；任一行缺实测时长则返回 null（无法精确对齐时不动画面） */
+function dubTimelineMs(lines: CutAudioLine[]): number | null {
+  let total = 0;
+  for (const l of lines) {
+    if (l.durationMs === null || l.durationMs === undefined) return null;
+    total += l.durationMs;
+  }
+  return HEAD_PAD_MS + total + LINE_GAP_MS * (lines.length - 1) + TAIL_PAD_MS;
+}
+
 /** 各音轨模式下，有配音镜头的视频原声音量系数 */
 const ORIGINAL_VOLUME: Record<'SMART' | 'DUCK' | 'MIX', number> = {
   SMART: 0,
@@ -117,8 +135,15 @@ async function doCompose(
       await transcodeSegment(src, seg, canvas);
       const shotAudio = audioByShot.get(items[i].shotId) ?? [];
       if (shotAudio.length > 0) {
+        // 精确对齐配音时间轴：视频过长按台词裁剪（口型段=可见段），过短末帧定格补足
+        const targetMs = dubTimelineMs(shotAudio);
+        let fitted = seg;
+        if (targetMs !== null) {
+          const fit = path.join(tmpDir, `seg-${String(i).padStart(3, '0')}-fit.mp4`);
+          if (await fitSegmentDuration(seg, fit, targetMs)) fitted = fit;
+        }
         const mixed = path.join(tmpDir, `seg-${String(i).padStart(3, '0')}-dub.mp4`);
-        await mixDubbing(seg, shotAudio, mixed, ORIGINAL_VOLUME[audioMixMode]);
+        await mixDubbing(fitted, shotAudio, mixed, ORIGINAL_VOLUME[audioMixMode]);
         segPaths.push(mixed);
       } else {
         segPaths.push(seg);
@@ -201,10 +226,42 @@ async function transcodeSegment(
 }
 
 /**
- * 把镜头的配音行混入转码后的片段：台词按序 concat 成整段配音，从镜头起点与
- * 片段自身音轨混合。originalVolume 控制原声占比（0=替换 / 0.25=垫底 / 1=等响叠加），
- * duration=first 锁定片段时长——时长链保证视频 ≥ 配音总长，超出部分自然截断。
- * 视频流直接 copy 不二压。
+ * 把片段精确适配到配音时间轴长度：过长 → 按 targetMs 裁剪（说话段=可见段，口型与台词同长）；
+ * 过短 → 末帧定格（tpad clone）补足，绝不截断台词。误差 ≤120ms 时跳过（返回 false，避免无谓二压）。
+ */
+async function fitSegmentDuration(
+  segPath: string,
+  outPath: string,
+  targetMs: number,
+): Promise<boolean> {
+  const actualMs = await probeDurationMs(segPath);
+  if (Math.abs(actualMs - targetMs) <= 120) return false;
+  const targetS = (targetMs / 1000).toFixed(3);
+  if (actualMs > targetMs) {
+    await runFfmpeg([
+      '-y', '-i', segPath,
+      '-t', targetS,
+      '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-ar', '44100', '-ac', '2',
+      outPath,
+    ]);
+    return true;
+  }
+  const extraS = ((targetMs - actualMs) / 1000 + 0.2).toFixed(3); // 略多补一点，再用 -t 精确封口
+  await runFfmpeg([
+    '-y', '-i', segPath,
+    '-vf', `tpad=stop_mode=clone:stop_duration=${extraS}`,
+    '-af', 'apad',
+    '-t', targetS,
+    '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-ar', '44100', '-ac', '2',
+    outPath,
+  ]);
+  return true;
+}
+
+/**
+ * 把镜头的配音行混入片段：台词按序 concat（行间插 300ms 静音，与时长链一致），
+ * 整轨延迟 HEAD_PAD 后与片段自身音轨混合。originalVolume 控制原声占比
+ * （0=替换 / 0.25=垫底 / 1=等响叠加），duration=first 锁定片段时长。视频流直接 copy 不二压。
  */
 async function mixDubbing(
   segPath: string,
@@ -219,14 +276,25 @@ async function mixDubbing(
     }
   }
   const inputs = lineAbsPaths.flatMap((p) => ['-i', p]);
-  // 各台词统一到 44100/立体声/fltp 后 concat；原声先按模式调音量再与配音混合（不做归一化，保配音响度）
-  const norm = lineAbsPaths
-    .map((_, k) => `[${k + 1}:a]aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo[l${k}]`)
-    .join(';');
-  const concatIn = lineAbsPaths.map((_, k) => `[l${k}]`).join('');
+  // 各台词统一到 44100/立体声/fltp；行间 300ms 静音；整轨 adelay 头部留白；与原声混合（不归一化，保配音响度）
+  const parts: string[] = [];
+  const concatIn: string[] = [];
+  for (let k = 0; k < lineAbsPaths.length; k++) {
+    parts.push(
+      `[${k + 1}:a]aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo[l${k}]`,
+    );
+    concatIn.push(`[l${k}]`);
+    if (k < lineAbsPaths.length - 1) {
+      parts.push(
+        `aevalsrc=0:channel_layout=stereo:sample_rate=44100:duration=${(LINE_GAP_MS / 1000).toFixed(1)}[g${k}]`,
+      );
+      concatIn.push(`[g${k}]`);
+    }
+  }
   const fc =
-    `[0:a]volume=${originalVolume}[orig];${norm};` +
-    `${concatIn}concat=n=${lineAbsPaths.length}:v=0:a=1[dub];` +
+    `[0:a]volume=${originalVolume}[orig];${parts.join(';')};` +
+    `${concatIn.join('')}concat=n=${concatIn.length}:v=0:a=1[cat];` +
+    `[cat]adelay=${HEAD_PAD_MS}:all=1[dub];` +
     `[orig][dub]amix=inputs=2:duration=first:normalize=0[aout]`;
   await runFfmpeg([
     '-y',
