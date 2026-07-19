@@ -23,6 +23,7 @@ import {
   useCuts,
   useGenJob,
   useStoryboardTakes,
+  type AudioMixMode,
   type ShotWithTakes,
   type TakeEntity,
 } from '../../api/video-hooks';
@@ -76,6 +77,7 @@ export function EnhanceStage() {
 
   /* ---------- 合成成片：POST cuts → { cut, job } → 轮询 ---------- */
   const createCut = useCreateCut(episodeId);
+  const [audioMixMode, setAudioMixMode] = useState<AudioMixMode>('SMART');
   const [composeJobId, setComposeJobId] = useState<string | null>(null);
   const jobQuery = useGenJob(composeJobId, 2000);
   const job = jobQuery.data;
@@ -107,13 +109,16 @@ export function EnhanceStage() {
       message.warning(`还有 ${missingCount} 个镜头未选定视频，请先到视频阶段生成并选定`);
       return;
     }
-    createCut.mutate(selectedStoryboardId, {
-      onSuccess: ({ job: j }) => {
-        message.success('已提交合成任务');
-        setComposeJobId(j.id);
+    createCut.mutate(
+      { storyboardId: selectedStoryboardId, audioMixMode },
+      {
+        onSuccess: ({ job: j }) => {
+          message.success('已提交合成任务');
+          setComposeJobId(j.id);
+        },
+        onError: (e) => message.error(e.message),
       },
-      onError: (e) => message.error(e.message),
-    });
+    );
   };
 
   /* ---------- 历史 Cut ---------- */
@@ -150,6 +155,24 @@ export function EnhanceStage() {
               )}
             </Text>
           )}
+          <Space size={8}>
+            <Tooltip title="有配音的镜头如何处理视频自带的声音（无配音镜头总是保留原声）">
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                音轨
+              </Text>
+            </Tooltip>
+            <Select
+              size="small"
+              style={{ width: 150 }}
+              value={audioMixMode}
+              onChange={(v: AudioMixMode) => setAudioMixMode(v)}
+              options={[
+                { value: 'SMART', label: '配音替换原声' },
+                { value: 'DUCK', label: '原声压低垫底' },
+                { value: 'MIX', label: '原声配音叠加' },
+              ]}
+            />
+          </Space>
           <Tooltip
             title={
               missingCount > 0

@@ -150,6 +150,93 @@ describe('COMPOSE_CUT 执行器（真 ffmpeg）', () => {
   });
 
   it(
+    '音轨模式：440Hz 原声视频 + 880Hz 配音 → SMART 压掉原声保留配音，MIX 两者叠加',
+    async () => {
+      const draft3 = await t.db.scriptDraft.create({ data: { episodeId, isMain: false } });
+      const sb3 = await t.db.storyboard.create({
+        data: { episodeId, scriptDraftId: draft3.id, version: 3 },
+      });
+      // makePlaceholderVideo 自带 440Hz 正弦音轨 = "视频生成的声音"
+      const tonedVideo = allocFilePath(projectId, 'mp4');
+      await makePlaceholderVideo({ outPath: tonedVideo.absPath, durationMs: 1000, color: 'indigo' });
+      const videoAsset = await t.db.asset.create({
+        data: {
+          projectId,
+          type: 'VIDEO',
+          source: 'GENERATED',
+          uri: tonedVideo.uri,
+          mime: 'video/mp4',
+          sizeBytes: fileSize(tonedVideo.absPath),
+          durationMs: await probeDurationMs(tonedVideo.absPath),
+        },
+      });
+      const shot = await t.db.shot.create({
+        data: { storyboardId: sb3.id, sortOrder: 0, sourceText: '双音轨镜头' },
+      });
+      const take = await t.db.take.create({
+        data: { shotId: shot.id, slot: 'VIDEO', assetId: videoAsset.id },
+      });
+      await t.db.shot.update({ where: { id: shot.id }, data: { videoSelectedTakeId: take.id } });
+
+      const wav = allocFilePath(projectId, 'wav');
+      await makeSineWav({ outPath: wav.absPath, durationMs: 500, freq: 880 });
+      const audioAsset = await t.db.asset.create({
+        data: {
+          projectId,
+          type: 'AUDIO',
+          source: 'GENERATED',
+          uri: wav.uri,
+          mime: 'audio/wav',
+          sizeBytes: fileSize(wav.absPath),
+          durationMs: await probeDurationMs(wav.absPath),
+        },
+      });
+      const dialogue = await t.db.dialogueLine.create({
+        data: { shotId: shot.id, text: '台词', sortOrder: 0 },
+      });
+      await t.db.dubbingLine.create({
+        data: {
+          shotId: shot.id,
+          dialogueLineId: dialogue.id,
+          audioAssetId: audioAsset.id,
+          durationMs: 500,
+          status: 'READY',
+        },
+      });
+
+      const bandpassMeanDb = async (mediaPath: string, freq: number): Promise<number> => {
+        const out = await runFfmpeg([
+          '-i', mediaPath,
+          '-map', '0:a:0',
+          '-af', `bandpass=f=${freq}:w=100,volumedetect`,
+          '-f', 'null', '-',
+        ]);
+        const m = /mean_volume:\s*(-?[\d.]+) dB/.exec(out);
+        return m ? parseFloat(m[1]) : -91;
+      };
+
+      const compose = async (audioMixMode: 'SMART' | 'MIX'): Promise<string> => {
+        const cut = await createCut(t.db, { episodeId, storyboardId: sb3.id });
+        const job = await makeJob({ cutId: cut.id, audioMixMode });
+        const result = await composeCut({ db: t.db, job, updateProgress: async () => {} });
+        const asset = await t.db.asset.findUnique({ where: { id: result.outputAssetIds![0] } });
+        return uriToAbsPath(asset!.uri);
+      };
+
+      const smartOut = await compose('SMART');
+      const mixOut = await compose('MIX');
+
+      const smart440 = await bandpassMeanDb(smartOut, 440);
+      const mix440 = await bandpassMeanDb(mixOut, 440);
+      const smart880 = await bandpassMeanDb(smartOut, 880);
+      // SMART 把原声(440)压掉：显著低于 MIX；配音(880)仍然可闻
+      expect(mix440 - smart440).toBeGreaterThan(12);
+      expect(smart880).toBeGreaterThan(-45);
+    },
+    120_000,
+  );
+
+  it(
     '配音混入：静音视频镜头 + 两条 READY 配音行 → 快照进 audioTracksJson、成片可听见声音、血缘含音频资产',
     async () => {
       // 独立分镜：仅一个镜头，视频无音轨（转码会补静音）——若混音失效，成片必然全程静音

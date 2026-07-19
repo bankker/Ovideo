@@ -19,7 +19,15 @@ export interface CutRoutesOptions {
   enqueue: EnqueueFn;
 }
 
-const CreateCutBodySchema = z.object({ storyboardId: z.string().min(1) });
+/**
+ * 音轨模式：SMART（默认）= 有配音的镜头以配音替换视频原声，无配音镜头保留原声；
+ * DUCK = 有配音镜头原声压低到 25% 与配音混合；MIX = 原声与配音等响叠加（旧行为）。
+ */
+const AudioMixModeSchema = z.enum(['SMART', 'DUCK', 'MIX']);
+const CreateCutBodySchema = z.object({
+  storyboardId: z.string().min(1),
+  audioMixMode: AudioMixModeSchema.default('SMART'),
+});
 
 export const cutRoutes: FastifyPluginAsync<CutRoutesOptions> = async (app, { db, enqueue }) => {
   // 创建成片并入队合成任务（合成免费，一律 MOCK 执行器 = 本机 ffmpeg）
@@ -34,7 +42,7 @@ export const cutRoutes: FastifyPluginAsync<CutRoutesOptions> = async (app, { db,
       projectId: episode.projectId,
       type: 'COMPOSE_CUT',
       executor: 'LOCAL',
-      inputPayload: { cutId: created.id },
+      inputPayload: { cutId: created.id, audioMixMode: body.audioMixMode },
     });
     reply.code(202);
     return { cut: await getCut(db, created.id), job };

@@ -24,7 +24,18 @@ const WIDTH = 720;
 const HEIGHT = 1280;
 const FPS = 24;
 
-const ComposeCutInputSchema = z.object({ cutId: z.string().min(1) });
+const ComposeCutInputSchema = z.object({
+  cutId: z.string().min(1),
+  // SMART=配音替换原声（默认）；DUCK=原声压低 25% 垫底；MIX=等响叠加（旧行为）。仅影响有配音的镜头。
+  audioMixMode: z.enum(['SMART', 'DUCK', 'MIX']).default('SMART'),
+});
+
+/** 各音轨模式下，有配音镜头的视频原声音量系数 */
+const ORIGINAL_VOLUME: Record<'SMART' | 'DUCK' | 'MIX', number> = {
+  SMART: 0,
+  DUCK: 0.25,
+  MIX: 1,
+};
 
 /** 统一规格的视频滤镜：等比缩放 + 居中补边 + 固定帧率（容错各段分辨率/帧率差异） */
 const VF = `scale=${WIDTH}:${HEIGHT}:force_original_aspect_ratio=decrease,pad=${WIDTH}:${HEIGHT}:(ow-iw)/2:(oh-ih)/2,fps=${FPS}`;
@@ -36,11 +47,13 @@ export function registerCutExecutor(): void {
 
 export const composeCut: JobExecutor = async (ctx) => {
   const { db, job } = ctx;
-  const { cutId } = ComposeCutInputSchema.parse(parseJson<Record<string, unknown>>(job.inputJson, {}));
+  const { cutId, audioMixMode } = ComposeCutInputSchema.parse(
+    parseJson<Record<string, unknown>>(job.inputJson, {}),
+  );
   const cut = await db.cut.findUnique({ where: { id: cutId } });
   if (!cut) throw notFound('成片');
   try {
-    return await doCompose(ctx, cut);
+    return await doCompose(ctx, cut, audioMixMode);
   } catch (err) {
     // 失败先落 Cut 状态再 rethrow：Job 面板与美化页都能看到失败态
     await db.cut
@@ -50,7 +63,11 @@ export const composeCut: JobExecutor = async (ctx) => {
   }
 };
 
-async function doCompose(ctx: JobExecutorContext, cut: Cut): Promise<JobExecutorResult> {
+async function doCompose(
+  ctx: JobExecutorContext,
+  cut: Cut,
+  audioMixMode: 'SMART' | 'DUCK' | 'MIX',
+): Promise<JobExecutorResult> {
   const { db, job, updateProgress } = ctx;
   const items = parseJson<CutItem[]>(cut.itemsJson, []);
   if (items.length === 0) throw badRequest('成片没有可合成的片段');
@@ -74,7 +91,7 @@ async function doCompose(ctx: JobExecutorContext, cut: Cut): Promise<JobExecutor
       const shotAudio = audioByShot.get(items[i].shotId) ?? [];
       if (shotAudio.length > 0) {
         const mixed = path.join(tmpDir, `seg-${String(i).padStart(3, '0')}-dub.mp4`);
-        await mixDubbing(seg, shotAudio, mixed);
+        await mixDubbing(seg, shotAudio, mixed, ORIGINAL_VOLUME[audioMixMode]);
         segPaths.push(mixed);
       } else {
         segPaths.push(seg);
@@ -153,10 +170,16 @@ async function transcodeSegment(srcPath: string, outPath: string): Promise<void>
 
 /**
  * 把镜头的配音行混入转码后的片段：台词按序 concat 成整段配音，从镜头起点与
- * 片段自身音轨（真实环境多为静音）amix。duration=first 锁定片段时长——
- * 时长链保证视频 ≥ 配音总长，超出部分自然截断。视频流直接 copy 不二压。
+ * 片段自身音轨混合。originalVolume 控制原声占比（0=替换 / 0.25=垫底 / 1=等响叠加），
+ * duration=first 锁定片段时长——时长链保证视频 ≥ 配音总长，超出部分自然截断。
+ * 视频流直接 copy 不二压。
  */
-async function mixDubbing(segPath: string, lines: CutAudioLine[], outPath: string): Promise<void> {
+async function mixDubbing(
+  segPath: string,
+  lines: CutAudioLine[],
+  outPath: string,
+  originalVolume: number,
+): Promise<void> {
   const lineAbsPaths = lines.map((l) => uriToAbsPath(l.uri));
   for (let k = 0; k < lineAbsPaths.length; k++) {
     if (!fs.existsSync(lineAbsPaths[k])) {
@@ -164,14 +187,15 @@ async function mixDubbing(segPath: string, lines: CutAudioLine[], outPath: strin
     }
   }
   const inputs = lineAbsPaths.flatMap((p) => ['-i', p]);
-  // 各台词统一到 44100/立体声/fltp 后 concat；再与片段音轨混合（不做归一化，保配音响度）
+  // 各台词统一到 44100/立体声/fltp 后 concat；原声先按模式调音量再与配音混合（不做归一化，保配音响度）
   const norm = lineAbsPaths
     .map((_, k) => `[${k + 1}:a]aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo[l${k}]`)
     .join(';');
   const concatIn = lineAbsPaths.map((_, k) => `[l${k}]`).join('');
   const fc =
-    `${norm};${concatIn}concat=n=${lineAbsPaths.length}:v=0:a=1[dub];` +
-    `[0:a][dub]amix=inputs=2:duration=first:normalize=0[aout]`;
+    `[0:a]volume=${originalVolume}[orig];${norm};` +
+    `${concatIn}concat=n=${lineAbsPaths.length}:v=0:a=1[dub];` +
+    `[orig][dub]amix=inputs=2:duration=first:normalize=0[aout]`;
   await runFfmpeg([
     '-y',
     '-i', segPath,

@@ -245,14 +245,29 @@ export function useCut(cutId: string | null) {
   });
 }
 
+/**
+ * 音轨模式：SMART=配音替换有配音镜头的视频原声（默认）；DUCK=原声压低垫底；MIX=等响叠加。
+ * 无配音的镜头任何模式下都保留视频原声。
+ */
+export type AudioMixMode = 'SMART' | 'DUCK' | 'MIX';
+
 /** 从选定 video takes 创建 Cut 并入队 COMPOSE_CUT；返回 { cut, job } */
 export function useCreateCut(episodeId: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (storyboardId: string) =>
+    mutationFn: ({
+      storyboardId,
+      audioMixMode,
+    }: {
+      storyboardId: string;
+      audioMixMode?: AudioMixMode;
+    }) =>
       api<CreateCutResult>(`/episodes/${episodeId}/cuts`, {
         method: 'POST',
-        body: { storyboardId },
+        body: {
+          storyboardId,
+          ...(audioMixMode !== undefined ? { audioMixMode } : {}),
+        },
       }),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: ['cuts', episodeId] });

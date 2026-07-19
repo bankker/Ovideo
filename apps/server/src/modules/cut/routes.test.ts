@@ -74,7 +74,7 @@ describe('POST /api/episodes/:id/cuts', () => {
     expect(input.projectId).toBe(projectId);
     expect(input.type).toBe('COMPOSE_CUT');
     expect(input.executor).toBe('LOCAL');
-    expect(input.inputPayload).toEqual({ cutId: body.cut.id });
+    expect(input.inputPayload).toEqual({ cutId: body.cut.id, audioMixMode: 'SMART' });
   });
 
   it('有镜头未选定视频 → 400 且不入队', async () => {
