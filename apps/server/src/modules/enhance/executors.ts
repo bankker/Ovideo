@@ -6,17 +6,16 @@ import type { PrismaClient } from '@prisma/client';
 import { badRequest, notFound } from '../../lib/errors.js';
 import { parseJson } from '../../lib/json.js';
 import { allocFilePath, fileSize, uriToAbsPath } from '../../lib/storage.js';
-import { extractFrame, probeDurationMs, runFfmpeg } from '../../lib/ffmpeg.js';
+import { extractFrame, probeDimensions, probeDurationMs, runFfmpeg } from '../../lib/ffmpeg.js';
 import { registerExecutor, type JobExecutor } from '../job/registry.js';
 import { createAsset } from '../asset/service.js';
 
 const EnhanceInputSchema = z.object({ shotId: z.string() });
 
-/** 单个增强类型的差异点：滤镜串 + meta 标记 + 产物尺寸（缺省继承原资产宽高） */
+/** 单个增强类型的差异点：滤镜串 + meta 标记（产物尺寸一律实测，不做静态假设） */
 interface EnhanceSpec {
   kind: 'upscale' | 'interpolate';
   videoFilter: string;
-  outSize?: { width: number; height: number };
 }
 
 /** 读镜头及其 selected 的 VIDEO take（含资产）；无选定视频直接抛错（与路由提前拦截同文案） */
@@ -55,8 +54,9 @@ function makeEnhanceExecutor(spec: EnhanceSpec): JobExecutor {
     ]);
     await updateProgress(70);
 
-    // 实测时长 + 抽帧缩略图（与生成执行器同一套元数据链路）
+    // 实测时长/分辨率 + 抽帧缩略图（与生成执行器同一套元数据链路）
     const actualMs = await probeDurationMs(file.absPath);
+    const dims = await probeDimensions(file.absPath);
     const thumbFile = allocFilePath(job.projectId, 'png');
     await extractFrame({
       videoPath: file.absPath,
@@ -71,9 +71,9 @@ function makeEnhanceExecutor(spec: EnhanceSpec): JobExecutor {
       uri: file.uri,
       mime: 'video/mp4',
       sizeBytes: fileSize(file.absPath),
-      // 放大产物尺寸固定；补帧继承原资产宽高（分辨率不变）
-      width: spec.outSize?.width ?? take.asset.width ?? undefined,
-      height: spec.outSize?.height ?? take.asset.height ?? undefined,
+      // 产物尺寸实测（放大是等比缩放，随源片比例变化；补帧分辨率不变）
+      width: dims?.width ?? take.asset.width ?? undefined,
+      height: dims?.height ?? take.asset.height ?? undefined,
       durationMs: actualMs,
       meta: { enhance: spec.kind, from: take.assetId },
       jobId: job.id,
@@ -97,13 +97,12 @@ function makeEnhanceExecutor(spec: EnhanceSpec): JobExecutor {
 
 /** 统一入口：集成阶段（app 启动）调用一次 */
 export function registerEnhanceExecutors(): void {
-  // 高清放大：lanczos 缩放到 1080x1920（竖屏 720p→1080p）
+  // 高清放大：等比 1.5 倍 lanczos 缩放（720p 档→1080p 档），比例跟随源片，宽高取偶对齐编码器
   registerExecutor(
     'UPSCALE',
     makeEnhanceExecutor({
       kind: 'upscale',
-      videoFilter: 'scale=1080:1920:flags=lanczos',
-      outSize: { width: 1080, height: 1920 },
+      videoFilter: 'scale=trunc(iw*3/4)*2:trunc(ih*3/4)*2:flags=lanczos',
     }),
   );
   // 智能补帧：minterpolate 运动补偿插值到 48fps。CPU 路径很慢，仅本地开发可用；生产替换为 GPU 节点（RIFE 等）

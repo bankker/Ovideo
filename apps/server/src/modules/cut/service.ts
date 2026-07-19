@@ -99,6 +99,19 @@ export async function createCut(db: PrismaClient, input: CreateCutInput): Promis
     }))
     .sort((a, b) => a.order - b.order || a.dubbingLineId.localeCompare(b.dubbingLineId));
 
+  // 守门：有台词却一条就绪配音都没有 → 大概率是配音漏了（而非有意做无声片），
+  // 静默合成会让人误以为"配音替换原声失效"，这里直接明确报错。
+  if (audioLines.length === 0) {
+    const dialogueCount = await db.dialogueLine.count({
+      where: { shotId: { in: shots.map((s) => s.id) } },
+    });
+    if (dialogueCount > 0) {
+      throw badRequest(
+        '该分镜版本有台词，但还没有任何已生成的配音——请先到「配音」页生成（或重新生成）配音后再合成成片',
+      );
+    }
+  }
+
   const agg = await db.cut.aggregate({ where: { episodeId }, _max: { version: true } });
   const version = (agg._max.version ?? 0) + 1;
 

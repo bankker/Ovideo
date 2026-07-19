@@ -221,6 +221,68 @@ describe('applyPatch：复制携带产物', () => {
     expect(await tdb.db.take.count({ where: { shotId: a1.id } })).toBe(2);
   });
 
+  it('配音行随版本复制（台词按 sortOrder 映射到新行）；台词被整组替换的镜头不复制配音', async () => {
+    const { ep, dr } = await freshEpisode();
+    const base = { episodeId: ep.id, scriptDraftId: dr.id };
+    const v1 = await apply({
+      ...base,
+      patch: [
+        { op: 'add_shot', shot: makeShot('A', { dialogue: [{ isNarrator: false, text: '你好' }] }) },
+        { op: 'add_shot', shot: makeShot('B', { dialogue: [{ isNarrator: true, text: '旧旁白' }] }) },
+      ],
+    });
+    const [a1, b1] = await loadShots(v1.storyboard.id);
+    const audio = await makeAsset();
+    await tdb.db.dubbingLine.create({
+      data: {
+        shotId: a1.id,
+        dialogueLineId: a1.dialogue[0].id,
+        audioAssetId: audio.id,
+        durationMs: 1234,
+        speed: 1.1,
+        status: 'READY',
+      },
+    });
+    await tdb.db.dubbingLine.create({
+      data: {
+        shotId: b1.id,
+        dialogueLineId: b1.dialogue[0].id,
+        audioAssetId: audio.id,
+        durationMs: 500,
+        status: 'READY',
+      },
+    });
+
+    // 只整组替换 B 的台词；A 原样复制
+    const v2 = await apply({
+      ...base,
+      baseStoryboardId: v1.storyboard.id,
+      patch: [
+        {
+          op: 'update_shot',
+          shotId: b1.id,
+          fields: { dialogue: [{ isNarrator: true, text: '新旁白' }] },
+        },
+      ],
+    });
+    const shots2 = await loadShots(v2.storyboard.id);
+    const a2 = shots2.find((s) => s.sourceText === 'A')!;
+    const b2 = shots2.find((s) => s.sourceText === 'B')!;
+
+    // A 的配音复制为新行：音频/时长/语速/状态原样，台词指针映射到新台词行
+    const dubA2 = await tdb.db.dubbingLine.findMany({ where: { shotId: a2.id } });
+    expect(dubA2).toHaveLength(1);
+    expect(dubA2[0].audioAssetId).toBe(audio.id);
+    expect(dubA2[0].durationMs).toBe(1234);
+    expect(dubA2[0].speed).toBeCloseTo(1.1);
+    expect(dubA2[0].status).toBe('READY');
+    expect(dubA2[0].dialogueLineId).toBe(a2.dialogue[0].id);
+    // B 台词被整组替换 → 旧配音不带过来（必须重配音）
+    expect(await tdb.db.dubbingLine.count({ where: { shotId: b2.id } })).toBe(0);
+    // 旧版本配音不丢
+    expect(await tdb.db.dubbingLine.count({ where: { shotId: a1.id } })).toBe(1);
+  });
+
   it('镜头级 Binding 复制为指向新 shot 的新行，标签级绑定不动', async () => {
     const { ep, dr } = await freshEpisode();
     const base = { episodeId: ep.id, scriptDraftId: dr.id };

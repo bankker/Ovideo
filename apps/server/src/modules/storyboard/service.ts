@@ -39,7 +39,7 @@ export interface ApplyPatchResult {
 }
 
 type BaseShot = Prisma.ShotGetPayload<{
-  include: { tags: true; dialogue: true; takes: true };
+  include: { tags: true; dialogue: true; takes: true; dubbingLines: true };
 }>;
 
 type Entry =
@@ -71,7 +71,12 @@ export async function applyPatch(
           include: {
             shots: {
               orderBy: { sortOrder: 'asc' },
-              include: { tags: true, dialogue: { orderBy: { sortOrder: 'asc' } }, takes: true },
+              include: {
+                tags: true,
+                dialogue: { orderBy: { sortOrder: 'asc' } },
+                takes: true,
+                dubbingLines: true,
+              },
             },
           },
         });
@@ -201,6 +206,31 @@ export async function applyPatch(
               },
             },
           });
+
+          // 复制配音行（台词被整组替换时跳过——新台词必须重配音）：
+          // 按 sortOrder 把旧台词行映射到刚创建的新台词行，音频资产/时长/状态原样带过去，
+          // 保证改提示词出新版本后配音不丢（丢了会导致合成时"配音替换原声"静默失效）。
+          if (!overrides.dialogue && base.dubbingLines.length > 0) {
+            const newDialogue = await tx.dialogueLine.findMany({
+              where: { shotId: created.id },
+            });
+            const oldIdBySort = new Map(base.dialogue.map((d) => [d.id, d.sortOrder]));
+            const newIdBySort = new Map(newDialogue.map((d) => [d.sortOrder, d.id]));
+            for (const line of base.dubbingLines) {
+              const sort = line.dialogueLineId ? oldIdBySort.get(line.dialogueLineId) : undefined;
+              await tx.dubbingLine.create({
+                data: {
+                  shotId: created.id,
+                  dialogueLineId: sort !== undefined ? (newIdBySort.get(sort) ?? null) : null,
+                  voiceProfileId: line.voiceProfileId,
+                  speed: line.speed,
+                  audioAssetId: line.audioAssetId,
+                  durationMs: line.durationMs,
+                  status: line.status,
+                },
+              });
+            }
+          }
 
           // 复制 Take（新行指向同 assetId/jobId），selected 指针按 旧take→新take 重定向
           const takeIdMap = new Map<string, string>();

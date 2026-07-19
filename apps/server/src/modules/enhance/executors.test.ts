@@ -109,7 +109,7 @@ async function probeVideoStream(absPath: string): Promise<{ width: number; heigh
 }
 
 describe('UPSCALE（真 ffmpeg）', () => {
-  it('720x1280 → 1080x1920；新资产元数据/血缘/meta 齐全；新 take 自动 selected；stale 不动', async () => {
+  it('720x1280 → 等比 1.5x 1080x1920；新资产元数据/血缘/meta 齐全；新 take 自动 selected；stale 不动', async () => {
     // 种 videoStale: true 验证"stale 不动"：增强既不清除已有失效，也不追加溯源
     const { shot, asset: src, take: srcTake } = await seedShotWithSelectedVideo({
       durationMs: 1000,
@@ -161,6 +161,22 @@ describe('UPSCALE（真 ffmpeg）', () => {
     // 抽帧缩略图真实存在
     expect(out!.thumbUri).toBeTruthy();
     expect(fs.existsSync(uriToAbsPath(out!.thumbUri!))).toBe(true);
+  }, 120000);
+
+  it('横屏 1280x720 → 等比 1920x1080（比例跟随源片，不再写死竖屏画布）', async () => {
+    const { shot } = await seedShotWithSelectedVideo({
+      durationMs: 1000,
+      width: 1280,
+      height: 720,
+    });
+    const ctx = await makeCtx('UPSCALE', { shotId: shot.id });
+    const r = await getExecutor('UPSCALE')!(ctx);
+    const out = await db.asset.findUnique({ where: { id: r.outputAssetIds![0]! } });
+    expect(out?.width).toBe(1920);
+    expect(out?.height).toBe(1080);
+    const probe = await probeVideoStream(uriToAbsPath(out!.uri));
+    expect(probe.width).toBe(1920);
+    expect(probe.height).toBe(1080);
   }, 120000);
 
   it('无 selected video 抛「请先生成并选定视频片段」', async () => {
