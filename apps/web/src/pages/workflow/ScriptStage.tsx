@@ -10,6 +10,7 @@ import {
 import { useParams } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import {
+  Alert,
   Button,
   Card,
   Divider,
@@ -36,6 +37,7 @@ import {
   BulbOutlined,
   EditOutlined,
   PlusOutlined,
+  ReloadOutlined,
   SendOutlined,
   StarOutlined,
   ThunderboltOutlined,
@@ -73,6 +75,22 @@ const TAG_COLOR: Record<TagType, string> = {
   SCENE: 'volcano',
   PROP: 'gold',
 };
+
+/** 三步生成分镜的请求参数（用于失败后原样重试） */
+interface GenerateStoryboardPayload {
+  draftId: string;
+  modelConfigId?: string;
+}
+
+/**
+ * 分镜生成的常驻失败态。
+ * detail 是服务端错误全文（原样呈现，不截断不改写）；
+ * payload 是这次失败对应的请求参数快照，「重试」按它原样重发。
+ */
+interface StoryboardFailure {
+  detail: string;
+  payload: GenerateStoryboardPayload;
+}
 
 const EMPTY_NEW_SHOT = {
   imagePrompt: '',
@@ -214,6 +232,10 @@ export function ScriptStage() {
   const jobQuery = useJob(runningJobId);
   const job = jobQuery.data;
   const pendingSelectLatestRef = useRef(false);
+  /** 分镜生成失败的常驻提示（入队失败与 Job FAILED 共用同一份状态） */
+  const [generateFailure, setGenerateFailure] = useState<StoryboardFailure | null>(null);
+  /** 最近一次发起用的参数：Job 轮询到 FAILED 时也要能原样重试 */
+  const lastGeneratePayloadRef = useRef<GenerateStoryboardPayload | null>(null);
 
   useEffect(() => {
     if (!job || job.id !== runningJobId) return;
@@ -224,7 +246,10 @@ export function ScriptStage() {
       setRunningJobId(null);
       setDedupSignal((s) => s + 1); // 生成产生了新标签 → 静默判重
     } else if (job.status === 'FAILED') {
-      message.error(job.error ?? '分镜生成失败');
+      const detail = job.error ?? '分镜生成失败，服务端未返回具体原因。';
+      message.error(detail);
+      const payload = lastGeneratePayloadRef.current;
+      if (payload !== null) setGenerateFailure({ detail, payload });
       setRunningJobId(null);
     } else if (job.status === 'CANCELED') {
       message.warning('生成任务已取消');
@@ -234,22 +259,32 @@ export function ScriptStage() {
 
   const generating = generate.isPending || runningJobId !== null;
 
+  /** 统一的发起入口：新发起与「重试」共用，保证参数与错误清理逻辑只有一份 */
+  const submitGenerate = (payload: GenerateStoryboardPayload) => {
+    if (generating) return;
+    setGenerateFailure(null); // 再次发起 → 清除旧的失败提示
+    lastGeneratePayloadRef.current = payload;
+    generate.mutate(payload, {
+      onSuccess: (j) => {
+        message.success('已提交生成任务');
+        setRunningJobId(j.id);
+      },
+      onError: (e) => {
+        // 入队就失败（400 / 网络断）：同样留下常驻提示
+        const detail = e instanceof Error ? e.message : '分镜生成请求失败。';
+        message.error(detail);
+        setGenerateFailure({ detail, payload });
+      },
+    });
+  };
+
   const handleGenerate = () => {
     if (selectedDraft === null) return;
     if (dirty) {
       message.warning('请先保存剧本内容再生成');
       return;
     }
-    generate.mutate(
-      { draftId: selectedDraft.id, modelConfigId: textModelId },
-      {
-        onSuccess: (j) => {
-          message.success('已提交生成任务');
-          setRunningJobId(j.id);
-        },
-        onError: (e) => message.error(e.message),
-      },
-    );
+    submitGenerate({ draftId: selectedDraft.id, modelConfigId: textModelId });
   };
 
   /* ---------- 分镜结果 ---------- */
@@ -408,6 +443,7 @@ export function ScriptStage() {
                 textModelId={textModelId}
                 onTextModelChange={setTextModelId}
                 onCreated={handleStarterCreated}
+                onGenerationStart={() => setStarterOpen(true)}
               />
             </div>
           </>
@@ -524,6 +560,11 @@ export function ScriptStage() {
             disabled={selectedDraft === null || showStarter}
             onGenerate={handleGenerate}
             progressText={progressText}
+            failure={generateFailure}
+            onRetry={() => {
+              if (generateFailure !== null) submitGenerate(generateFailure.payload);
+            }}
+            onDismissFailure={() => setGenerateFailure(null)}
           />
 
           <Divider style={{ margin: '12px 0' }} />
@@ -896,6 +937,9 @@ function SettingsPanel({
   disabled,
   onGenerate,
   progressText,
+  failure,
+  onRetry,
+  onDismissFailure,
 }: {
   textModels: CapabilityEntry[];
   textModelId: string | undefined;
@@ -904,6 +948,10 @@ function SettingsPanel({
   disabled: boolean;
   onGenerate: () => void;
   progressText: string | null;
+  /** 生成失败的常驻提示；null 表示无失败 */
+  failure: StoryboardFailure | null;
+  onRetry: () => void;
+  onDismissFailure: () => void;
 }) {
   const { token } = theme.useToken();
   return (
@@ -959,6 +1007,43 @@ function SettingsPanel({
         <Text type="secondary" style={{ fontSize: 12 }}>
           {progressText}
         </Text>
+      )}
+
+      {/* 生成失败：常驻在发起按钮下方，直接展示服务端错误全文 + 原参数重试。
+          右栏只有 300px，重试按钮放进正文区（而非 Alert 的 action 位）更好读 */}
+      {failure !== null && (
+        <Alert
+          type="error"
+          showIcon
+          closable
+          onClose={onDismissFailure}
+          message="分镜生成失败"
+          description={
+            <div>
+              <div
+                style={{
+                  whiteSpace: 'pre-wrap',
+                  wordBreak: 'break-word',
+                  fontSize: 12,
+                  lineHeight: 1.7,
+                }}
+              >
+                {failure.detail}
+              </div>
+              <Button
+                size="small"
+                danger
+                icon={<ReloadOutlined />}
+                disabled={generating}
+                style={{ marginTop: 8 }}
+                onClick={onRetry}
+              >
+                重试
+              </Button>
+            </div>
+          }
+          style={{ marginTop: 4 }}
+        />
       )}
     </div>
   );

@@ -1,10 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
-import { Button, Card, Input, Select, Space, Spin, Typography, Upload, message } from 'antd';
-import { ThunderboltOutlined, UploadOutlined } from '@ant-design/icons';
+import { Alert, Button, Card, Input, Select, Space, Spin, Typography, Upload, message } from 'antd';
+import { ReloadOutlined, ThunderboltOutlined, UploadOutlined } from '@ant-design/icons';
 import type { CapabilityEntry } from '@ovideo/shared';
 import { useJob } from '../../api/workflow-hooks';
-import { useGenerateScriptDraft, useImportScriptDraft } from '../../api/script-hooks';
+import {
+  useGenerateScriptDraft,
+  useImportScriptDraft,
+  type GenerateScriptDraftInput,
+} from '../../api/script-hooks';
 
 const { Text, Title } = Typography;
 
@@ -17,6 +21,16 @@ const DURATION_OPTIONS = [
   { value: 300, label: '5 分钟' },
 ];
 
+/**
+ * 剧本生成的常驻失败态。
+ * detail 是服务端错误全文（原样呈现，不截断不改写）；
+ * payload 是这次失败对应的请求参数快照，「重试」按它原样重发。
+ */
+interface GenerateFailure {
+  detail: string;
+  payload: GenerateScriptDraftInput;
+}
+
 export interface ScriptStarterProps {
   episodeId: string;
   /** 文本模型清单由页面统一拉取后传入，避免同页重复请求 */
@@ -25,6 +39,13 @@ export interface ScriptStarterProps {
   onTextModelChange: (modelConfigId: string | undefined) => void;
   /** 剧本稿就绪（生成完成或导入成功）→ 页面选中它并切回编辑器 */
   onCreated: (draftId: string) => void;
+  /**
+   * 发起生成时通知页面把入口钉住。
+   * 服务端是"先建空稿再入队"，草稿一落库页面就认为"已有剧本稿"，
+   * 若不钉住，入口会在提交的瞬间被卸载——进度、轮询、以及用户填的创意一起消失，
+   * 看起来就像"根本没调用模型"。
+   */
+  onGenerationStart: () => void;
 }
 
 /**
@@ -38,6 +59,7 @@ export function ScriptStarter({
   textModelId,
   onTextModelChange,
   onCreated,
+  onGenerationStart,
 }: ScriptStarterProps) {
   const qc = useQueryClient();
   const [brief, setBrief] = useState('');
@@ -50,6 +72,10 @@ export function ScriptStarter({
   /** 正在生成的 Job 与它对应的草稿：Job 成功后要把这一稿交回页面 */
   const [runningJobId, setRunningJobId] = useState<string | null>(null);
   const pendingDraftIdRef = useRef<string | null>(null);
+  /** 生成失败的常驻提示（入队失败与 Job FAILED 共用同一份状态） */
+  const [failure, setFailure] = useState<GenerateFailure | null>(null);
+  /** 最近一次发起用的参数：Job 轮询到 FAILED 时也要能原样重试 */
+  const lastPayloadRef = useRef<GenerateScriptDraftInput | null>(null);
   const jobQuery = useJob(runningJobId);
   const job = jobQuery.data;
 
@@ -69,8 +95,11 @@ export function ScriptStarter({
       }
     } else if (job.status === 'FAILED') {
       // 空草稿保留在列表里（付费产物零删除原则的延伸：用户可自行编辑或重试），
-      // 所以这里只报错，不清理任何东西
-      message.error(job.error ?? '剧本生成失败');
+      // 所以这里只报错，不清理任何东西——尤其不清空用户填的创意文本
+      const detail = job.error ?? '剧本生成失败，服务端未返回具体原因。';
+      message.error(detail);
+      const payload = lastPayloadRef.current;
+      if (payload !== null) setFailure({ detail, payload });
       setRunningJobId(null);
       pendingDraftIdRef.current = null;
     } else if (job.status === 'CANCELED') {
@@ -83,24 +112,36 @@ export function ScriptStarter({
   const generating = generate.isPending || runningJobId !== null;
   const trimmedBrief = brief.trim();
 
+  /** 统一的发起入口：新发起与「重试」共用，保证参数与错误清理逻辑只有一份 */
+  const submitGenerate = (payload: GenerateScriptDraftInput) => {
+    if (generating) return;
+    setFailure(null); // 再次发起 → 清除旧的失败提示
+    // 先钉住入口：空稿一落库页面就会认为"已有剧本稿"，不钉住这一屏会当场消失
+    onGenerationStart();
+    lastPayloadRef.current = payload;
+    generate.mutate(payload, {
+      onSuccess: (res) => {
+        pendingDraftIdRef.current = res.draft.id;
+        setRunningJobId(res.job.id);
+      },
+      onError: (e) => {
+        // 入队就失败（400 / 网络断）：同样留下常驻提示，不清空用户填的内容
+        const detail = e instanceof Error ? e.message : '剧本生成请求失败。';
+        message.error(detail);
+        setFailure({ detail, payload });
+      },
+    });
+  };
+
   const handleGenerate = () => {
     if (trimmedBrief === '' || generating) return;
     const trimmedStyle = style.trim();
-    generate.mutate(
-      {
-        brief: trimmedBrief,
-        durationSec,
-        ...(trimmedStyle !== '' ? { style: trimmedStyle } : {}),
-        ...(textModelId !== undefined ? { modelConfigId: textModelId } : {}),
-      },
-      {
-        onSuccess: (res) => {
-          pendingDraftIdRef.current = res.draft.id;
-          setRunningJobId(res.job.id);
-        },
-        onError: (e) => message.error(e.message),
-      },
-    );
+    submitGenerate({
+      brief: trimmedBrief,
+      durationSec,
+      ...(trimmedStyle !== '' ? { style: trimmedStyle } : {}),
+      ...(textModelId !== undefined ? { modelConfigId: textModelId } : {}),
+    });
   };
 
   const progressText =
@@ -170,6 +211,33 @@ export function ScriptStarter({
         >
           生成剧本
         </Button>
+
+        {/* 生成失败：常驻在发起区域内，直接展示服务端错误全文 + 原参数重试 */}
+        {failure !== null && (
+          <Alert
+            type="error"
+            showIcon
+            closable
+            onClose={() => setFailure(null)}
+            message="剧本生成失败"
+            description={
+              <div style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: 13 }}>
+                {failure.detail}
+              </div>
+            }
+            action={
+              <Button
+                size="small"
+                danger
+                icon={<ReloadOutlined />}
+                disabled={generating}
+                onClick={() => submitGenerate(failure.payload)}
+              >
+                重试
+              </Button>
+            }
+          />
+        )}
 
         {generating && (
           <Space size={8}>
