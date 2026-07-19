@@ -62,6 +62,7 @@ export function registerExecutors(): void {
       {
         prompt: args.prompt,
         outPath: args.outPath,
+        size: args.size,
         // 绑定/默认设计图作为参考图上送（Seedream i2i），保证角色与场景形象一致
         refImagePaths: args.refUris.map((u) => uriToAbsPath(u)),
       },
@@ -84,6 +85,7 @@ export function registerExecutors(): void {
         firstFramePath: args.firstFrameUri ? uriToAbsPath(args.firstFrameUri) : null,
         durationMs: args.durationMs,
         outPath: args.outPath,
+        resolution: args.resolution,
         onProgress: args.onProgress,
       },
     );

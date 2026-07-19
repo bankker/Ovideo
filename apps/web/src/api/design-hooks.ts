@@ -198,14 +198,17 @@ export function useGenerateDesign() {
       tagId,
       prompt,
       modelConfigId,
+      size,
     }: {
       tagId: string;
       prompt?: string;
       modelConfigId?: string;
+      /** 图像尺寸（画幅比例映射，如 '1024x1792'），缺省由服务端决定 */
+      size?: string;
     }) =>
       api<JobEntity>(`/tags/${tagId}/designs/generate`, {
         method: 'POST',
-        body: { prompt, modelConfigId },
+        body: { prompt, modelConfigId, size },
       }),
   });
 }
@@ -245,6 +248,30 @@ export function useRemoveDesign(projectId: string) {
     onSuccess: (_result, { tagId }) => {
       void qc.invalidateQueries({ queryKey: ['designs', tagId] });
       void qc.invalidateQueries({ queryKey: ['tags', projectId] });
+    },
+  });
+}
+
+/** ---------- 角色声音（VoiceProfile 音色指定） ---------- */
+
+export interface VoiceProfileEntity {
+  id: string;
+  name: string;
+  /** 空串 = 未指定（运行时自动分配） */
+  voiceId: string;
+}
+
+/** 指定角色音色；voiceId 传空串 = 清除回自动分配。成功后失效全部配音行查询（前缀 ['dubbing']） */
+export function useUpdateVoiceProfile() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ voiceProfileId, voiceId }: { voiceProfileId: string; voiceId: string }) =>
+      api<VoiceProfileEntity>(`/voice-profiles/${voiceProfileId}`, {
+        method: 'PATCH',
+        body: { voiceId },
+      }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['dubbing'] });
     },
   });
 }

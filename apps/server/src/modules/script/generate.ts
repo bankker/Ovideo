@@ -19,7 +19,11 @@ export interface StoryboardGeneratorCtx {
 
 export type TextGenFn = (prompt: string) => Promise<string>;
 
-export function buildStoryboardPrompt(script: string, tags: Array<Pick<Tag, 'name' | 'type'>>): string {
+export function buildStoryboardPrompt(
+  script: string,
+  tags: Array<Pick<Tag, 'name' | 'type'>>,
+  stylePrompt = '',
+): string {
   const byType = (type: string, label: string) => {
     const names = tags.filter((t) => t.type === type).map((t) => t.name);
     return `${label}：${names.length > 0 ? names.join('、') : '（无）'}`;
@@ -33,7 +37,9 @@ export function buildStoryboardPrompt(script: string, tags: Array<Pick<Tag, 'nam
     '2. 同一地点全剧必须用同一个场景标签（如统一用「办公室」；时间与氛围如"白天/明亮"写进 imagePrompt，绝不写进标签名）；【严禁】把"同一/相同/还是/原"这类指代词写进标签名——"同一办公室"必须直接复用「办公室」标签；',
     '3. 角色标签用剧本中的真实姓名，同一角色全剧同名；',
     '4. imagePrompt/videoPrompt 中出场的角色、道具、场景一律写成 @标签名（例："@办公室 内，@小悟 趴在 @办公桌 前疯狂打字"）——@ 后必须是 tags 数组里一字不差的标签名，【原样中文，严禁翻译、拆字或音译】（"小悟"绝不能写成 small悟 / Little Wu / Xiaowu）；@标签名 之后紧跟一个空格再接其他文字；',
-    '5. 画面风格：这是漫剧（动画短剧），imagePrompt 一律采用动漫/漫画风格（anime/manga style），严禁写 realistic style 或写实风格，除非剧本明确要求。',
+    stylePrompt
+      ? `5. 画面风格：全剧统一为「${stylePrompt}」——imagePrompt 的风格描述必须与之一致，严禁偏离。`
+      : '5. 画面风格：这是漫剧（动画短剧），imagePrompt 一律采用动漫/漫画风格（anime/manga style），严禁写 realistic style 或写实风格，除非剧本明确要求。',
     '项目已有标签词表如下，语义相同的角色/场景/道具必须复用下列同名标签，不得另造别名：',
     byType('CHARACTER', '角色'),
     byType('SCENE', '场景'),
@@ -73,7 +79,8 @@ export function createStoryboardGenerator({ textGen }: { textGen: TextGenFn }) {
     const projectId = draft.episode.projectId;
 
     const existingTags = await db.tag.findMany({ where: { projectId } });
-    const prompt = buildStoryboardPrompt(draft.content, existingTags);
+    const project = await db.project.findUnique({ where: { id: projectId } });
+    const prompt = buildStoryboardPrompt(draft.content, existingTags, project?.stylePrompt ?? '');
     await updateProgress(10);
 
     const attempt = async (): Promise<GeneratedStoryboard> =>

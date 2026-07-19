@@ -28,6 +28,8 @@ export const CapabilityDescriptorSchema = z.object({
     .optional(),
   /** JSON Schema：前端据此渲染该模型的参数表单 */
   paramsSchema: z.record(z.unknown()).optional(),
+  /** 语音模型的可选音色（配音页"角色声音"面板数据源） */
+  voices: z.array(z.object({ id: z.string(), label: z.string() })).optional(),
   flags: z
     .object({
       supportsVoiceReference: z.boolean().optional(),

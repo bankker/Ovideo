@@ -24,7 +24,7 @@ export async function getProject(db: PrismaClient, id: string): Promise<Project>
 export async function updateProject(
   db: PrismaClient,
   id: string,
-  input: { name?: string; description?: string; archived?: boolean },
+  input: { name?: string; description?: string; stylePrompt?: string; archived?: boolean },
 ): Promise<Project> {
   await getProject(db, id);
   return db.project.update({
@@ -32,6 +32,7 @@ export async function updateProject(
     data: {
       ...(input.name !== undefined && { name: input.name }),
       ...(input.description !== undefined && { description: input.description }),
+      ...(input.stylePrompt !== undefined && { stylePrompt: input.stylePrompt }),
       ...(input.archived !== undefined && { archived: input.archived }),
     },
   });

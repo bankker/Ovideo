@@ -198,13 +198,27 @@ export function useClearStale() {
   });
 }
 
+/** 视频分辨率档位 */
+export type VideoResolution = '480p' | '720p' | '1080p';
+
 /** 生成视频片段（I2V）：返回 Job，调用方用 useGenJob 轮询 */
 export function useGenerateShotVideo() {
   return useMutation({
-    mutationFn: ({ shotId, modelConfigId }: { shotId: string; modelConfigId?: string }) =>
+    mutationFn: ({
+      shotId,
+      modelConfigId,
+      resolution,
+    }: {
+      shotId: string;
+      modelConfigId?: string;
+      resolution?: VideoResolution;
+    }) =>
       api<JobEntity>(`/shots/${shotId}/generate-video`, {
         method: 'POST',
-        body: modelConfigId !== undefined ? { modelConfigId } : {},
+        body: {
+          ...(modelConfigId !== undefined ? { modelConfigId } : {}),
+          ...(resolution !== undefined ? { resolution } : {}),
+        },
       }),
   });
 }

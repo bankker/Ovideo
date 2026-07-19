@@ -13,6 +13,8 @@ export type ImageGen = (args: {
   prompt: string;
   refUris: string[];
   outPath: string;
+  /** 输出尺寸（如 '1024x1792'）；缺省由适配器决定（默认竖屏 9:16） */
+  size?: string;
   modelCfg?: GenModelCfg;
 }) => Promise<void>;
 
@@ -21,6 +23,8 @@ export type VideoGen = (args: {
   firstFrameUri: string | null;
   durationMs: number;
   outPath: string;
+  /** 输出分辨率（'480p'|'720p'|'1080p'）；缺省 720p */
+  resolution?: string;
   modelCfg?: GenModelCfg;
   /** 长耗时的真实视频生成用于回报任务进度（Mock 忽略） */
   onProgress?: (percent: number) => Promise<void> | void;

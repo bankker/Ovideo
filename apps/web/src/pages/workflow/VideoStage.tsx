@@ -37,6 +37,7 @@ import {
   useStoryboardTakes,
   type ShotWithTakes,
   type TakeEntity,
+  type VideoResolution,
 } from '../../api/video-hooks';
 import { getShotGroup, useSplitGroup } from '../../api/enhance-hooks';
 
@@ -56,6 +57,13 @@ interface GroupMeta {
 
 /** 衔接组拆分阈值：锁定时长超过 15s 的非组镜头提供「拆分为衔接组」 */
 const SPLIT_THRESHOLD_MS = 15000;
+
+/** 分辨率选项（1080p 成本更高，label 加提示） */
+const RESOLUTION_OPTIONS: Array<{ value: VideoResolution; label: string }> = [
+  { value: '480p', label: '480p' },
+  { value: '720p', label: '720p' },
+  { value: '1080p', label: '1080p（贵）' },
+];
 
 /** 视频阶段：I2V 逐镜头生成视频片段（抽卡语义：takes 横排 + selected 金框） */
 export function VideoStage() {
@@ -84,6 +92,9 @@ export function VideoStage() {
   const capsQuery = useCapabilities('video');
   const capabilities = capsQuery.data ?? [];
   const [modelConfigId, setModelConfigId] = useState<string | undefined>(undefined);
+
+  /* ---------- 分辨率（页面级共用；1080p 成本更高） ---------- */
+  const [resolution, setResolution] = useState<VideoResolution>('720p');
 
   /* ---------- videoPrompt 就地编辑（apply-patch → 新版本） ---------- */
   const applyPatch = useApplyPatch(episodeId);
@@ -165,6 +176,16 @@ export function VideoStage() {
               />
             </Space>
           )}
+          <Space size={8}>
+            <Text type="secondary">分辨率</Text>
+            <Select
+              size="small"
+              style={{ width: 92 }}
+              value={resolution}
+              onChange={(v: VideoResolution) => setResolution(v)}
+              options={RESOLUTION_OPTIONS}
+            />
+          </Space>
           {shots.length > 0 && (
             <Space size={8}>
               <Text>
@@ -212,6 +233,7 @@ export function VideoStage() {
                 episodeId={episodeId}
                 storyboardId={selectedStoryboardId ?? ''}
                 modelConfigId={modelConfigId}
+                resolution={resolution}
                 patching={applyPatch.isPending}
                 onUpdatePrompt={updateVideoPrompt}
                 onSwitchVersion={(id) => setSelectedStoryboardId(id)}
@@ -233,6 +255,7 @@ function VideoShotCard({
   episodeId,
   storyboardId,
   modelConfigId,
+  resolution,
   patching,
   onUpdatePrompt,
   onSwitchVersion,
@@ -243,6 +266,8 @@ function VideoShotCard({
   episodeId: string;
   storyboardId: string;
   modelConfigId: string | undefined;
+  /** 顶部工具栏选择的分辨率（页面级共用） */
+  resolution: VideoResolution;
   patching: boolean;
   onUpdatePrompt: (shotId: string, videoPrompt: string) => Promise<void>;
   onSwitchVersion: (storyboardId: string) => void;
@@ -299,7 +324,7 @@ function VideoShotCard({
 
   const handleGenerate = () => {
     generate.mutate(
-      { shotId: shot.id, modelConfigId },
+      { shotId: shot.id, modelConfigId, resolution },
       {
         onSuccess: (j) => {
           message.success('已提交视频生成任务');

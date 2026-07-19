@@ -84,7 +84,22 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
       preset('qwen-plus', 'Qwen Plus', 'text', true),
       preset('qwen-max', 'Qwen Max', 'text', false),
       preset('qwen-flash', 'Qwen Flash', 'text', false),
-      preset('qwen-tts', 'Qwen-TTS 语音合成', 'tts', true, '配音功能的语音模型，同一把 Key 即用'),
+      {
+        key: 'qwen-tts',
+        label: 'Qwen-TTS 语音合成',
+        modality: 'tts',
+        recommended: true,
+        note: '配音功能的语音模型，同一把 Key 即用',
+        capability: {
+          ...defaultCapabilityFor('tts'),
+          voices: [
+            { id: 'Cherry', label: '芊悦（女·活泼）' },
+            { id: 'Ethan', label: '晨煦（男·阳光）' },
+            { id: 'Chelsie', label: '千雪（女·温柔）' },
+            { id: 'Serena', label: '苏瑶（女·沉稳）' },
+          ],
+        },
+      },
     ],
   },
   {

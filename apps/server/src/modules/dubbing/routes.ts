@@ -58,6 +58,15 @@ export const dubbingRoutes: FastifyPluginAsync<DubbingRoutesOptions> = async (
     return updateDubbingLine(db, id, body);
   });
 
+  // 角色音色设置：voiceId 为语音模型音色名（如 Cherry/Ethan），空串清除回到自动分配
+  app.patch('/api/voice-profiles/:id', async (req) => {
+    const { id } = req.params as { id: string };
+    const body = z.object({ voiceId: z.string().max(60) }).parse(req.body ?? {});
+    const profile = await db.voiceProfile.findUnique({ where: { id } });
+    if (!profile) throw notFound('角色声音');
+    return db.voiceProfile.update({ where: { id }, data: { voiceId: body.voiceId || null } });
+  });
+
   // 单句 TTS：入队 GENERATE_TTS，行置 GENERATING，202 返回 job
   app.post('/api/dubbing-lines/:id/generate', async (req, reply) => {
     const { id } = req.params as { id: string };

@@ -189,10 +189,22 @@ export function useGenerateAllDubbing() {
 
 export function useGenerateKeyframe() {
   return useMutation({
-    mutationFn: ({ shotId, modelConfigId }: { shotId: string; modelConfigId?: string }) =>
+    mutationFn: ({
+      shotId,
+      modelConfigId,
+      size,
+    }: {
+      shotId: string;
+      modelConfigId?: string;
+      /** 图像尺寸（如 '1024x1792'，由页面比例选择映射而来） */
+      size?: string;
+    }) =>
       api<JobEntity>(`/shots/${shotId}/generate-keyframe`, {
         method: 'POST',
-        body: modelConfigId !== undefined ? { modelConfigId } : {},
+        body: {
+          ...(modelConfigId !== undefined ? { modelConfigId } : {}),
+          ...(size !== undefined ? { size } : {}),
+        },
       }),
   });
 }

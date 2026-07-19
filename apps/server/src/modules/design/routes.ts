@@ -18,6 +18,7 @@ const GenerateDesignBodySchema = z.object({
   modelConfigId: z.string().optional(),
   /** 自定义 prompt；缺省由「标签名，描述」组装 */
   prompt: z.string().optional(),
+  size: z.string().optional(),
 });
 
 const SetCanonicalBodySchema = z.object({
@@ -53,6 +54,7 @@ export const designRoutes: FastifyPluginAsync<DesignRoutesOptions> = async (app,
         tagId: tag.id,
         prompt,
         ...(body.modelConfigId ? { modelConfigId: body.modelConfigId } : {}),
+        ...(body.size ? { size: body.size } : {}),
       },
     });
     reply.code(202);

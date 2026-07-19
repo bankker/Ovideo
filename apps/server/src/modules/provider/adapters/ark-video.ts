@@ -18,6 +18,8 @@ export interface ArkVideoArgs {
   firstFramePath: string | null;
   durationMs: number;
   outPath: string;
+  /** '480p' | '720p' | '1080p'，缺省 720p */
+  resolution?: string;
   onProgress?: (percent: number) => Promise<void> | void;
   /** 轮询间隔与总超时（测试注入用） */
   pollIntervalMs?: number;
@@ -68,7 +70,7 @@ export async function arkVideoGenerate(cfg: ArkVideoConfig, args: ArkVideoArgs):
   const base = cfg.baseUrl.replace(/\/+$/, '');
   const durationS = mapSeedanceDurationS(args.durationMs);
   const commandText =
-    `${args.prompt.trim()} --resolution 720p --duration ${durationS} --ratio adaptive --watermark false`;
+    `${args.prompt.trim()} --resolution ${args.resolution ?? '720p'} --duration ${durationS} --ratio adaptive --watermark false`;
 
   const content: Array<Record<string, unknown>> = [{ type: 'text', text: commandText }];
   if (args.firstFramePath) {

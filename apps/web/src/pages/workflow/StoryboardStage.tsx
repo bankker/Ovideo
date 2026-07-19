@@ -46,6 +46,22 @@ const TAG_COLOR: Record<TagType, string> = {
   PROP: 'gold',
 };
 
+/** 画面比例 → 图像生成尺寸（与服务端图像生成契约一致） */
+type AspectRatio = '9:16' | '16:9' | '1:1' | '3:4' | '4:3';
+
+const RATIO_TO_SIZE: Record<AspectRatio, string> = {
+  '9:16': '1024x1792',
+  '16:9': '1792x1024',
+  '1:1': '1024x1024',
+  '3:4': '864x1152',
+  '4:3': '1152x864',
+};
+
+const RATIO_OPTIONS = (Object.keys(RATIO_TO_SIZE) as AspectRatio[]).map((r) => ({
+  value: r,
+  label: r,
+}));
+
 function formatSeconds(ms: number): string {
   return `${(Math.round(ms / 100) / 10).toFixed(1)}s`;
 }
@@ -109,6 +125,9 @@ export function StoryboardStage() {
   const generateKeyframe = useGenerateKeyframe();
   const [batchSubmitting, setBatchSubmitting] = useState(false);
 
+  /* ---------- 画面比例（页面级，所有镜头共用；映射为生成 size） ---------- */
+  const [ratio, setRatio] = useState<AspectRatio>('9:16');
+
   useEffect(() => {
     if (batchPolling && staleQuery.isSuccess && staleShots.length === 0) {
       setBatchPolling(false);
@@ -123,7 +142,7 @@ export function StoryboardStage() {
     let submitted = 0;
     for (const s of staleShots) {
       try {
-        await generateKeyframe.mutateAsync({ shotId: s.id });
+        await generateKeyframe.mutateAsync({ shotId: s.id, size: RATIO_TO_SIZE[ratio] });
         submitted += 1;
       } catch (e) {
         message.error(e instanceof Error ? e.message : '提交重生成失败');
@@ -221,6 +240,8 @@ export function StoryboardStage() {
               episodeId={episodeId}
               storyboardId={selectedStoryboardId ?? ''}
               imageModels={imageModels}
+              ratio={ratio}
+              onRatioChange={setRatio}
               patching={applyPatch.isPending}
               refCells={resolvedByShot.get(shot.id) ?? []}
               onUpdateImagePrompt={handleUpdateImagePrompt}
@@ -272,6 +293,8 @@ function ShotKeyframeCard({
   episodeId,
   storyboardId,
   imageModels,
+  ratio,
+  onRatioChange,
   patching,
   refCells,
   onUpdateImagePrompt,
@@ -281,6 +304,9 @@ function ShotKeyframeCard({
   episodeId: string;
   storyboardId: string;
   imageModels: CapabilityEntry[];
+  /** 页面级共享的画面比例（所有镜头共用） */
+  ratio: AspectRatio;
+  onRatioChange: (ratio: AspectRatio) => void;
   patching: boolean;
   refCells: ResolvedBindingCell[];
   onUpdateImagePrompt: (shotId: string, imagePrompt: string) => Promise<void>;
@@ -309,7 +335,7 @@ function ShotKeyframeCard({
 
   const handleGenerate = () => {
     generate.mutate(
-      { shotId: shot.id, modelConfigId },
+      { shotId: shot.id, modelConfigId, size: RATIO_TO_SIZE[ratio] },
       {
         onSuccess: (job) => {
           message.success('已提交生成任务');
@@ -488,6 +514,15 @@ function ShotKeyframeCard({
                 }))}
               />
             )}
+            <Tooltip title="画面比例（全部镜头共用）">
+              <Select
+                size="small"
+                style={{ width: 88 }}
+                value={ratio}
+                onChange={(v: AspectRatio) => onRatioChange(v)}
+                options={RATIO_OPTIONS}
+              />
+            </Tooltip>
             <Button
               size="small"
               type="primary"

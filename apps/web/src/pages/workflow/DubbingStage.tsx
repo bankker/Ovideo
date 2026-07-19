@@ -15,9 +15,16 @@ import {
   Typography,
   message,
 } from 'antd';
-import { SoundOutlined, SyncOutlined, ThunderboltOutlined, WarningOutlined } from '@ant-design/icons';
+import {
+  SoundOutlined,
+  SyncOutlined,
+  ThunderboltOutlined,
+  UserOutlined,
+  WarningOutlined,
+} from '@ant-design/icons';
 import type { DubbingStatus } from '@ovideo/shared';
 import { useStoryboards } from '../../api/workflow-hooks';
+import { useUpdateVoiceProfile } from '../../api/design-hooks';
 import {
   dubbingQueryOptions,
   useCapabilities,
@@ -35,6 +42,14 @@ const { Text } = Typography;
 
 /** 单次生成时长上限（超过提示 M3 衔接组） */
 const SINGLE_GEN_LIMIT_MS = 15_000;
+
+/** 模型能力未提供音色清单时的兜底（qwen-tts 四音色） */
+const FALLBACK_VOICES: Array<{ id: string; label: string }> = [
+  { id: 'Cherry', label: '芊悦（女·活泼）' },
+  { id: 'Ethan', label: '晨煦（男·阳光）' },
+  { id: 'Chelsie', label: '千雪（女·温柔）' },
+  { id: 'Serena', label: '苏瑶（女·沉稳）' },
+];
 
 const STATUS_META: Record<DubbingStatus, { color: string; label: string }> = {
   PENDING: { color: 'default', label: '待生成' },
@@ -111,6 +126,25 @@ export function DubbingStage() {
   const allLines = dubbingQueries.flatMap((q) => q.data ?? []);
   const generatingCount = allLines.filter((l) => l.status === 'GENERATING').length;
   const pendingCount = allLines.filter((l) => l.status === 'PENDING').length;
+
+  /* ---------- 角色声音面板：从全部配音行收集去重 voiceProfile ---------- */
+  const voiceProfileMap = new Map<string, { id: string; name: string; voiceId: string | null }>();
+  for (const line of allLines) {
+    const vp = line.voiceProfile;
+    if (vp !== null && vp !== undefined && !voiceProfileMap.has(vp.id)) {
+      // 契约中配音行 voiceProfile 携带 voiceId，本地类型未声明 → 交叉断言读取
+      const voiceId = (vp as typeof vp & { voiceId?: string | null }).voiceId ?? null;
+      voiceProfileMap.set(vp.id, { id: vp.id, name: vp.name, voiceId });
+    }
+  }
+  const voiceProfiles = [...voiceProfileMap.values()];
+
+  // 音色选项：选中模型的 voices → 队首模型的 voices → 固定四音色兜底
+  const activeTtsModel =
+    (ttsModelId !== undefined
+      ? ttsModels.find((m) => m.modelConfigId === ttsModelId)
+      : undefined) ?? ttsModels[0];
+  const voiceOptions = activeTtsModel?.capability.voices ?? FALLBACK_VOICES;
 
   // 批量提交后每 5s invalidate 所有 dubbing 查询，直到无 GENERATING
   useEffect(() => {
@@ -210,20 +244,90 @@ export function DubbingStage() {
         ) : shots.length === 0 ? (
           <Empty description="该分镜版本没有镜头" style={{ margin: '48px 0' }} />
         ) : (
-          shots.map((shot, index) => (
-            <ShotDubbingGroup
-              key={shot.id}
-              shot={shot}
-              index={index}
-              storyboardId={selectedStoryboardId ?? ''}
-              modelConfigId={ttsModelId}
-              lines={dubbingQueries[index]?.data ?? []}
-              loading={dubbingQueries[index]?.isLoading ?? false}
-            />
-          ))
+          <>
+            <VoiceProfilePanel profiles={voiceProfiles} voiceOptions={voiceOptions} />
+            {shots.map((shot, index) => (
+              <ShotDubbingGroup
+                key={shot.id}
+                shot={shot}
+                index={index}
+                storyboardId={selectedStoryboardId ?? ''}
+                modelConfigId={ttsModelId}
+                lines={dubbingQueries[index]?.data ?? []}
+                loading={dubbingQueries[index]?.isLoading ?? false}
+              />
+            ))}
+          </>
         )}
       </Card>
     </div>
+  );
+}
+
+/** ---------- 角色声音面板：每个 voiceProfile 一行，指定/清除音色 ---------- */
+
+function VoiceProfilePanel({
+  profiles,
+  voiceOptions,
+}: {
+  profiles: Array<{ id: string; name: string; voiceId: string | null }>;
+  voiceOptions: Array<{ id: string; label: string }>;
+}) {
+  const updateVoice = useUpdateVoiceProfile();
+
+  if (profiles.length === 0) return null;
+
+  return (
+    <Card
+      size="small"
+      style={{ marginBottom: 12 }}
+      title={
+        <Space size={6} style={{ fontWeight: 'normal' }}>
+          <UserOutlined />
+          <Text strong>角色声音</Text>
+        </Space>
+      }
+    >
+      <Space direction="vertical" size={8} style={{ width: '100%' }}>
+        {profiles.map((profile) => (
+          <Space key={profile.id} size={12} wrap>
+            <Text strong style={{ display: 'inline-block', minWidth: 80 }}>
+              {profile.name}
+            </Text>
+            <Select
+              size="small"
+              style={{ width: 200 }}
+              allowClear
+              placeholder="自动分配"
+              value={
+                profile.voiceId !== null && profile.voiceId !== '' ? profile.voiceId : undefined
+              }
+              options={voiceOptions.map((v) => ({ value: v.id, label: v.label }))}
+              onChange={(v: string | undefined) =>
+                updateVoice.mutate(
+                  { voiceProfileId: profile.id, voiceId: v ?? '' },
+                  {
+                    onSuccess: () =>
+                      message.success(
+                        v !== undefined
+                          ? `已指定「${profile.name}」的音色`
+                          : `「${profile.name}」已恢复自动分配`,
+                      ),
+                    onError: (e) => message.error(e.message),
+                  },
+                )
+              }
+            />
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              改音色后需重新生成该角色的配音
+            </Text>
+          </Space>
+        ))}
+        <Text type="secondary" style={{ fontSize: 12 }}>
+          旁白不在列表中（固定使用「苏瑶」音色）
+        </Text>
+      </Space>
+    </Card>
   );
 }
 

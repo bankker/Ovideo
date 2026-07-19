@@ -13,18 +13,21 @@ import {
   Select,
   Space,
   Spin,
+  Tag as AntTag,
   Tooltip,
   Typography,
   Upload,
   message,
 } from 'antd';
 import {
+  BgColorsOutlined,
   DeleteOutlined,
   PlusOutlined,
   ThunderboltOutlined,
   UploadOutlined,
 } from '@ant-design/icons';
 import type { CapabilityEntry, TagType } from '@ovideo/shared';
+import { useProject, useUpdateProject, type Project, type UpdateProjectInput } from '../../api/hooks';
 import { useJob } from '../../api/workflow-hooks';
 import { TagDedup } from '../../components/TagDedup';
 import {
@@ -48,6 +51,27 @@ const TAG_TYPE_LABEL: Record<TagType, string> = {
 };
 
 const GOLD = '#faad14';
+
+/** 画幅比例 → 图像生成 size（全站统一映射） */
+const RATIO_TO_SIZE: Record<string, string> = {
+  '9:16': '1024x1792',
+  '16:9': '1792x1024',
+  '1:1': '1024x1024',
+  '3:4': '864x1152',
+  '4:3': '1152x864',
+};
+const RATIO_OPTIONS = ['9:16', '16:9', '1:1', '3:4', '4:3'];
+const DEFAULT_RATIO = '9:16';
+
+/** 风格设定预设（点击 Tag 填充） */
+const STYLE_PRESETS: Array<{ label: string; prompt: string }> = [
+  { label: '日系动漫', prompt: '日系动漫风格，清新明快的赛璐璐上色，干净利落的线条' },
+  { label: '国漫厚涂', prompt: '国漫厚涂风格，厚重笔触与光影层次，色彩饱满立体' },
+  { label: '美式卡通', prompt: '美式卡通风格，夸张造型与高饱和配色，轮廓线粗犷' },
+  { label: '水墨国风', prompt: '水墨国风，留白写意，墨色浓淡相宜，古典东方意境' },
+  { label: '3D 皮克斯', prompt: '3D 皮克斯风格，圆润造型与细腻材质，柔和的全局光照' },
+  { label: '像素风', prompt: '像素风格，复古 8-bit 色块与抖动渐变，游戏机时代质感' },
+];
 
 /** 设计阶段：项目级标签（角色/场景/道具）的候选设计图工作台 */
 export function DesignStage() {
@@ -109,6 +133,7 @@ export function DesignStage() {
           新建标签
         </Button>
         <TagDedup projectId={projectId} />
+        <StylePromptButton projectId={projectId} />
       </Space>
 
       {tagsQuery.isLoading ? (
@@ -183,6 +208,86 @@ export function DesignStage() {
   );
 }
 
+/** ---------- 项目风格设定：TextArea + 预设快捷 Tag，保存到 Project.stylePrompt ---------- */
+
+function StylePromptButton({ projectId }: { projectId: string }) {
+  const projectQuery = useProject(projectId !== '' ? projectId : undefined);
+  // 服务端契约已含 stylePrompt，本地 Project 类型未声明 → 交叉断言读取
+  const savedStylePrompt =
+    (projectQuery.data as (Project & { stylePrompt?: string }) | undefined)?.stylePrompt ?? '';
+
+  const updateProject = useUpdateProject();
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState('');
+
+  const handleSave = () => {
+    updateProject.mutate(
+      {
+        id: projectId,
+        data: { stylePrompt: draft.trim() } as UpdateProjectInput & { stylePrompt: string },
+      },
+      {
+        onSuccess: () => {
+          message.success('已保存，之后的三步生成与生图将自动携带该画风');
+          setOpen(false);
+        },
+        onError: (e) => message.error(e.message),
+      },
+    );
+  };
+
+  return (
+    <>
+      <Button
+        icon={<BgColorsOutlined />}
+        onClick={() => {
+          setDraft(savedStylePrompt);
+          setOpen(true);
+        }}
+      >
+        风格设定
+      </Button>
+      <Modal
+        title="项目画风设定"
+        open={open}
+        onOk={handleSave}
+        confirmLoading={updateProject.isPending}
+        onCancel={() => setOpen(false)}
+        okText="保存"
+        cancelText="取消"
+      >
+        <Space direction="vertical" style={{ width: '100%' }} size={12}>
+          <Input.TextArea
+            value={draft}
+            maxLength={500}
+            showCount
+            autoSize={{ minRows: 3, maxRows: 8 }}
+            placeholder="描述整部作品的统一画风，如：日系动漫风格，清新明快……（留空 = 不附加画风）"
+            onChange={(e) => setDraft(e.target.value)}
+          />
+          <div>
+            <Text type="secondary" style={{ fontSize: 12, marginRight: 8 }}>
+              快捷预设：
+            </Text>
+            {STYLE_PRESETS.map((p) => (
+              <AntTag
+                key={p.label}
+                style={{ cursor: 'pointer', marginBottom: 4 }}
+                onClick={() => setDraft(p.prompt)}
+              >
+                {p.label}
+              </AntTag>
+            ))}
+          </div>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            保存后，剧本三步生成与所有图像生成（设计图 / 关键帧）将自动携带该画风描述
+          </Text>
+        </Space>
+      </Modal>
+    </>
+  );
+}
+
 /** ---------- 单个标签卡片：候选设计图墙 + AI 生成 / 上传 / 设为默认 / 解除关联 ---------- */
 
 function TagDesignCard({
@@ -231,9 +336,11 @@ function TagDesignCard({
 
   const defaultPrompt =
     tag.description.trim() !== '' ? `${tag.name}，${tag.description.trim()}` : tag.name;
-  const [genState, setGenState] = useState<{ prompt: string; modelConfigId?: string } | null>(
-    null,
-  );
+  const [genState, setGenState] = useState<{
+    prompt: string;
+    modelConfigId?: string;
+    ratio: string;
+  } | null>(null);
 
   const handleGenerate = () => {
     if (genState === null) return;
@@ -243,6 +350,7 @@ function TagDesignCard({
         tagId: tag.id,
         prompt: prompt !== '' ? prompt : undefined,
         modelConfigId: genState.modelConfigId,
+        size: RATIO_TO_SIZE[genState.ratio],
       },
       {
         onSuccess: (j) => {
@@ -285,7 +393,7 @@ function TagDesignCard({
             ghost
             icon={<ThunderboltOutlined />}
             loading={generating}
-            onClick={() => setGenState({ prompt: defaultPrompt })}
+            onClick={() => setGenState({ prompt: defaultPrompt, ratio: DEFAULT_RATIO })}
           >
             AI 生成
           </Button>
@@ -437,6 +545,20 @@ function TagDesignCard({
                 setGenState((s) => (s === null ? s : { ...s, prompt: e.target.value }))
               }
             />
+          </div>
+          <div>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              画幅比例
+            </Text>
+            <div style={{ marginTop: 4 }}>
+              <Segmented
+                options={RATIO_OPTIONS}
+                value={genState?.ratio ?? DEFAULT_RATIO}
+                onChange={(v) =>
+                  setGenState((s) => (s === null ? s : { ...s, ratio: String(v) }))
+                }
+              />
+            </div>
           </div>
           {imageCapabilities.length > 0 && (
             <div>

@@ -10,6 +10,10 @@ import { clearStale, getStaleShots, onTakeSelected } from '../stale/service.js';
 
 const GenerateBodySchema = z.object({
   modelConfigId: z.string().optional(),
+  /** 图像输出尺寸（如 '1024x1792'，见前端比例映射） */
+  size: z.string().optional(),
+  /** 视频输出分辨率（'480p'|'720p'|'1080p'） */
+  resolution: z.string().optional(),
 });
 
 const SelectTakeBodySchema = z.object({
@@ -56,20 +60,20 @@ export const generationRoutes: FastifyPluginAsync<GenerationRoutesOptions> = asy
   }
 
   app.post<{ Params: { id: string } }>('/api/shots/:id/generate-keyframe', async (req, reply) => {
-    const { modelConfigId } = GenerateBodySchema.parse(req.body ?? {});
+    const { modelConfigId, size } = GenerateBodySchema.parse(req.body ?? {});
     const { shot, projectId } = await loadShotWithProject(req.params.id);
     const job = await enqueue({
       projectId,
       type: 'GENERATE_IMAGE',
       executor: 'API',
-      inputPayload: { kind: 'keyframe', shotId: shot.id, modelConfigId },
+      inputPayload: { kind: 'keyframe', shotId: shot.id, modelConfigId, size },
     });
     reply.code(202);
     return job;
   });
 
   app.post<{ Params: { id: string } }>('/api/shots/:id/generate-video', async (req, reply) => {
-    const { modelConfigId } = GenerateBodySchema.parse(req.body ?? {});
+    const { modelConfigId, resolution } = GenerateBodySchema.parse(req.body ?? {});
     const { shot, projectId } = await loadShotWithProject(req.params.id);
     // 提前拦截（执行器内还会兜底校验）：
     // 衔接组段 >0 的首帧来自上一段尾帧（v2 §5），校验上一段已选定视频；其余镜头校验选定关键图
@@ -85,7 +89,7 @@ export const generationRoutes: FastifyPluginAsync<GenerationRoutesOptions> = asy
       projectId,
       type: 'GENERATE_VIDEO',
       executor: 'API',
-      inputPayload: { shotId: shot.id, modelConfigId },
+      inputPayload: { shotId: shot.id, modelConfigId, resolution },
     });
     reply.code(202);
     return job;

@@ -24,6 +24,7 @@ const KeyframeInputSchema = z.object({
   kind: z.literal('keyframe'),
   shotId: z.string(),
   modelConfigId: z.string().optional(),
+  size: z.string().optional(),
 });
 
 const DesignInputSchema = z.object({
@@ -31,6 +32,7 @@ const DesignInputSchema = z.object({
   tagId: z.string(),
   prompt: z.string().min(1),
   modelConfigId: z.string().optional(),
+  size: z.string().optional(),
 });
 
 const ImageInputSchema = z.discriminatedUnion('kind', [KeyframeInputSchema, DesignInputSchema]);
@@ -38,6 +40,7 @@ const ImageInputSchema = z.discriminatedUnion('kind', [KeyframeInputSchema, Desi
 const VideoInputSchema = z.object({
   shotId: z.string(),
   modelConfigId: z.string().optional(),
+  resolution: z.string().optional(),
 });
 
 const TtsInputSchema = z.object({
@@ -184,12 +187,15 @@ function makeKeyframeExecutor(gens: GenerationGens) {
     // 一致性说明放在提示词【开头】（模型对前部 token 权重更高），并硬性禁止角色人格化；
     // @ 符号发给模型前剥掉（名字保留）
     const basePrompt = stripMentions(rawPrompt);
+    // 项目级画风前缀（全剧风格一致，设计页可配置）
+    const project = await db.project.findUnique({ where: { id: job.projectId } });
+    const stylePrefix = project?.stylePrompt ? `【画风】${project.stylePrompt}。\n` : '';
     const prompt =
       refTagNotes.length > 0
-        ? `【形象一致性】${refTagNotes.join('；')}。角色的物种与形态严格按参考图，严禁把动物/机器人角色画成人类。\n${basePrompt}`
-        : basePrompt;
+        ? `${stylePrefix}【形象一致性】${refTagNotes.join('；')}。角色的物种与形态严格按参考图，严禁把动物/机器人角色画成人类。\n${basePrompt}`
+        : `${stylePrefix}${basePrompt}`;
     const file = allocFilePath(job.projectId, 'png');
-    await gens.imageGen({ prompt, refUris, outPath: file.absPath, modelCfg });
+    await gens.imageGen({ prompt, refUris, outPath: file.absPath, size: input.size, modelCfg });
     await updateProgress(70);
 
     const asset = await createAsset(db, {
@@ -237,8 +243,12 @@ function makeDesignExecutor(gens: GenerationGens) {
     await updateProgress(10);
 
     const refUris = tag.canonicalAsset ? [tag.canonicalAsset.uri] : [];
+    const project = await db.project.findUnique({ where: { id: job.projectId } });
+    const designPrompt = project?.stylePrompt
+      ? `【画风】${project.stylePrompt}。\n${input.prompt}`
+      : input.prompt;
     const file = allocFilePath(job.projectId, 'png');
-    await gens.imageGen({ prompt: input.prompt, refUris, outPath: file.absPath, modelCfg });
+    await gens.imageGen({ prompt: designPrompt, refUris, outPath: file.absPath, size: input.size, modelCfg });
     await updateProgress(70);
 
     const asset = await createAsset(db, {
@@ -343,6 +353,7 @@ function makeVideoExecutor(gens: GenerationGens): JobExecutor {
       firstFrameUri,
       durationMs,
       outPath: file.absPath,
+      resolution: input.resolution,
       modelCfg,
       onProgress: updateProgress,
     });
@@ -407,7 +418,8 @@ function makeTtsExecutor(gens: GenerationGens): JobExecutor {
       await gens.ttsGen({
         text,
         speed: line.speed,
-        voiceSeed: line.voiceProfileId ?? 'narrator',
+        // 角色配置了具体音色（voiceId）则直接用；否则以 profileId 稳定哈希分配
+        voiceSeed: line.voiceProfile?.voiceId || line.voiceProfileId || 'narrator',
         outPath: file.absPath,
         modelCfg,
       });

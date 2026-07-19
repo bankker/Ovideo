@@ -17,6 +17,8 @@ export const CreateProjectBodySchema = z.object({
 export const UpdateProjectBodySchema = z.object({
   name: z.string().min(1).max(100).optional(),
   description: z.string().max(2000).optional(),
+  /** 项目级画风设定，生成提示词自动携带（全剧风格一致） */
+  stylePrompt: z.string().max(500).optional(),
   archived: z.boolean().optional(),
 });
 export const CreateEpisodeBodySchema = z.object({
