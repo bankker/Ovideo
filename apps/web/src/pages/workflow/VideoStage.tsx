@@ -398,51 +398,95 @@ function VideoShotCard({
                 <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无选定视频" />
               </div>
             )}
-            {/* 首帧参考小图角标（衔接组非首段：首帧 = 上一段尾帧自动传递） */}
-            {selectedKeyframe !== null && (
-              <Tooltip
-                title={
-                  isChained
-                    ? '上一段尾帧（衔接组自动传递）'
-                    : '首帧参考（分镜阶段选定的关键图）'
-                }
-              >
-                <div
-                  style={{
-                    position: 'absolute',
-                    top: 6,
-                    left: 6,
-                    width: 64,
-                    borderRadius: 6,
-                    overflow: 'hidden',
-                    border: '1px solid rgba(255,255,255,0.8)',
-                    boxShadow: '0 1px 4px rgba(0,0,0,0.3)',
-                    lineHeight: 0,
-                  }}
-                >
-                  <img
-                    src={selectedKeyframe.asset.thumbUri ?? selectedKeyframe.asset.uri}
-                    alt="首帧"
-                    style={{ width: 64, height: 64, objectFit: 'cover', display: 'block' }}
-                  />
+            {/* 首帧参考小图角标：非衔接段可点开在本镜头的关键图抽卡版本间切换；组内非首段固定为上一段尾帧 */}
+            {selectedKeyframe !== null &&
+              (() => {
+                const badge = (
                   <div
                     style={{
                       position: 'absolute',
-                      bottom: 0,
-                      left: 0,
-                      right: 0,
-                      background: 'rgba(0,0,0,0.55)',
-                      color: '#fff',
-                      fontSize: 10,
-                      lineHeight: '14px',
-                      textAlign: 'center',
+                      top: 6,
+                      left: 6,
+                      width: 64,
+                      borderRadius: 6,
+                      overflow: 'hidden',
+                      border: '1px solid rgba(255,255,255,0.8)',
+                      boxShadow: '0 1px 4px rgba(0,0,0,0.3)',
+                      lineHeight: 0,
+                      cursor: isChained ? 'default' : 'pointer',
                     }}
                   >
-                    {isChained ? '上一段尾帧' : '首帧'}
+                    <img
+                      src={selectedKeyframe.asset.thumbUri ?? selectedKeyframe.asset.uri}
+                      alt="首帧"
+                      style={{ width: 64, height: 64, objectFit: 'cover', display: 'block' }}
+                    />
+                    <div
+                      style={{
+                        position: 'absolute',
+                        bottom: 0,
+                        left: 0,
+                        right: 0,
+                        background: 'rgba(0,0,0,0.55)',
+                        color: '#fff',
+                        fontSize: 10,
+                        lineHeight: '14px',
+                        textAlign: 'center',
+                      }}
+                    >
+                      {isChained ? '上一段尾帧' : `首帧 ${keyframeTakes.length > 1 ? '▾' : ''}`}
+                    </div>
                   </div>
-                </div>
-              </Tooltip>
-            )}
+                );
+                if (isChained) {
+                  return <Tooltip title="上一段尾帧（衔接组自动传递）">{badge}</Tooltip>;
+                }
+                return (
+                  <Popover
+                    trigger="click"
+                    placement="rightTop"
+                    title="选择首帧关键图（本镜头的抽卡版本）"
+                    content={
+                      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', maxWidth: 296 }}>
+                        {keyframeTakes.map((t) => {
+                          const isSel = t.id === shot.keyframeSelectedTakeId;
+                          return (
+                            <img
+                              key={t.id}
+                              src={t.asset.thumbUri ?? t.asset.uri}
+                              alt="关键图版本"
+                              title={isSel ? '当前首帧' : '点击用作首帧'}
+                              style={{
+                                width: 64,
+                                height: 64,
+                                objectFit: 'cover',
+                                borderRadius: 4,
+                                cursor: 'pointer',
+                                boxSizing: 'border-box',
+                                border: isSel ? '2px solid #faad14' : '2px solid transparent',
+                                opacity: selectTake.isPending ? 0.6 : 1,
+                              }}
+                              onClick={() => {
+                                if (isSel || selectTake.isPending) return;
+                                selectTake.mutate(
+                                  { shotId: shot.id, slot: 'KEYFRAME', takeId: t.id, storyboardId },
+                                  {
+                                    onSuccess: () =>
+                                      message.success('首帧已切换，重新生成视频将使用该关键图'),
+                                    onError: (e) => message.error(e.message),
+                                  },
+                                );
+                              }}
+                            />
+                          );
+                        })}
+                      </div>
+                    }
+                  >
+                    {badge}
+                  </Popover>
+                );
+              })()}
           </div>
           {selectedVideo !== null && (
             <div style={{ marginTop: 6 }}>
