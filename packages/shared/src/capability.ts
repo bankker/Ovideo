@@ -13,6 +13,8 @@ export const CapabilityInputSchema = z.enum([
   'ref_images',
   'voice_sample',
   'audio',
+  /** 视觉理解模型的输入：待评审图 + 参考图（区别于产图模型的 ref_images） */
+  'image',
 ]);
 export type CapabilityInput = z.infer<typeof CapabilityInputSchema>;
 

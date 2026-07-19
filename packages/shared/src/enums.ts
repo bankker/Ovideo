@@ -35,13 +35,16 @@ export const JobTypeSchema = z.enum([
   'EXTRACT_AUDIO',
   'COMPOSE_CUT',
   'PROVIDER_TEST',
+  // 关键图自动收敛 agent：生成→视觉评审→重抽/改写的多轮闭环（只生图，绝不触发视频生成）
+  'AGENT_KEYFRAME_CONVERGE',
 ]);
 export type JobType = z.infer<typeof JobTypeSchema>;
 
 export const ProviderCategorySchema = z.enum(['TEXT', 'IMAGE', 'VIDEO', 'TTS']);
 export type ProviderCategory = z.infer<typeof ProviderCategorySchema>;
 
-export const ModalitySchema = z.enum(['text', 'image', 'video', 'tts']);
+/** vision = 视觉理解（看图打分/评审），只读图不产图，与产图的 image 模态区分开 */
+export const ModalitySchema = z.enum(['text', 'image', 'video', 'tts', 'vision']);
 export type Modality = z.infer<typeof ModalitySchema>;
 
 export const DubbingStatusSchema = z.enum(['PENDING', 'GENERATING', 'READY', 'FAILED']);

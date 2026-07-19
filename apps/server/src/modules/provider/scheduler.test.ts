@@ -55,8 +55,11 @@ describe('按需调度：候选队列', () => {
     await db.providerConfig.deleteMany({});
   });
 
-  it('自动调度模态白名单含已有真实适配器的 text/image/tts', () => {
-    expect(AUTO_ROUTE_MODALITIES).toEqual(['text', 'image', 'tts']);
+  // vision（视觉评审）单次调用便宜，与 text/image/tts 一样自动调度；
+  // video 单次成本高，刻意留在白名单外由用户显式指定
+  it('自动调度模态白名单含 text/image/tts/vision，不含 video', () => {
+    expect(AUTO_ROUTE_MODALITIES).toEqual(['text', 'image', 'tts', 'vision']);
+    expect(AUTO_ROUTE_MODALITIES).not.toContain('video');
   });
 });
 

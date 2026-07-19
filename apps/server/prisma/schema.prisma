@@ -325,6 +325,29 @@ model ModelConfig {
   @@unique([providerConfigId, key])
 }
 
+// ---------- Agent（旁路层：只记录 agent 自身状态，核心表由 agent 以"人类同样的方式"写入） ----------
+
+/// 一次自动收敛运行。roundsJson 存 AgentRound[]（见 shared 契约），前端按轮次渲染。
+/// 铁律：agent 不写 Shot.imagePrompt，提示词改写只在本次运行内经 promptOverride 生效。
+model AgentRun {
+  id            String    @id @default(cuid())
+  projectId     String
+  shotId        String
+  kind          String // 'KEYFRAME_CONVERGE'
+  status        String // RUNNING | PASSED | NEEDS_HUMAN | FAILED | CANCELED
+  maxRounds     Int       @default(3)
+  roundsJson    String    @default("[]")
+  finalTakeId   String?
+  /// 运行期间人手动改过选定关键图：结束时不覆盖人的选择，只追加候选
+  humanOverride Boolean   @default(false)
+  jobId         String?
+  error         String?
+  createdAt     DateTime  @default(now())
+  finishedAt    DateTime?
+
+  @@index([shotId])
+}
+
 // ---------- M3 占位（建表不建功能） ----------
 
 model WorkflowTemplate {

@@ -14,6 +14,8 @@ const GenerateBodySchema = z.object({
   size: z.string().optional(),
   /** 视频输出分辨率（'480p'|'720p'|'1080p'） */
   resolution: z.string().optional(),
+  /** 本次生成改用的提示词（不写回 Shot.imagePrompt）；自动收敛 agent 的提示词改写走这里 */
+  promptOverride: z.string().optional(),
 });
 
 const SelectTakeBodySchema = z.object({
@@ -77,13 +79,13 @@ export const generationRoutes: FastifyPluginAsync<GenerationRoutesOptions> = asy
   }
 
   app.post<{ Params: { id: string } }>('/api/shots/:id/generate-keyframe', async (req, reply) => {
-    const { modelConfigId, size } = GenerateBodySchema.parse(req.body ?? {});
+    const { modelConfigId, size, promptOverride } = GenerateBodySchema.parse(req.body ?? {});
     const { shot, projectId } = await loadShotWithProject(req.params.id);
     const job = await enqueue({
       projectId,
       type: 'GENERATE_IMAGE',
       executor: 'API',
-      inputPayload: { kind: 'keyframe', shotId: shot.id, modelConfigId, size },
+      inputPayload: { kind: 'keyframe', shotId: shot.id, modelConfigId, size, promptOverride },
     });
     reply.code(202);
     return job;

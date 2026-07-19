@@ -5,9 +5,12 @@ import {
   Alert,
   Button,
   Card,
+  Collapse,
   Empty,
+  Image,
   Input,
   Popover,
+  Progress,
   Select,
   Space,
   Spin,
@@ -20,11 +23,19 @@ import {
 import {
   EditOutlined,
   PictureOutlined,
+  RobotOutlined,
   ThunderboltOutlined,
   WarningOutlined,
 } from '@ant-design/icons';
 import type { CapabilityEntry, StaleReason, TagType } from '@ovideo/shared';
 import { useApplyPatch, useStoryboards } from '../../api/workflow-hooks';
+import {
+  parseAgentRounds,
+  useAgentRuns,
+  useStartKeyframeConverge,
+  type AgentRun,
+  type AgentRunStatus,
+} from '../../api/agent-hooks';
 import { useResolvedBindings, type ResolvedBindingCell } from '../../api/design-hooks';
 import { chooseRefCells } from '../../utils/ref-policy';
 import { EffectivePromptPopover } from '../../components/EffectivePromptPopover';
@@ -318,6 +329,13 @@ function ShotKeyframeCard({
   const [editingPrompt, setEditingPrompt] = useState<string | null>(null);
 
   const generate = useGenerateKeyframe();
+  /* ---------- AI 辅助线：与上面的手工抽卡完全并列，互不影响 ---------- */
+  const agentRunsQuery = useAgentRuns(shot.id);
+  const agentRuns = agentRunsQuery.data ?? [];
+  const latestRun = agentRuns[0] ?? null; // 服务端按新到旧返回
+  const runningRun = agentRuns.find((r) => r.status === 'RUNNING') ?? null;
+  const startConverge = useStartKeyframeConverge();
+
   const shotJob = useShotJob({
     onSucceeded: () => {
       message.success(`#${index + 1} 关键图生成完成`);
@@ -539,6 +557,26 @@ function ShotKeyframeCard({
             >
               {keyframeTakes.length > 0 ? '重抽' : '生成关键图'}
             </Button>
+            <Tooltip title="AI 会自动抽卡并对照设计图评审，不满意时自动重抽；产出的每张都是候选，你随时可以自己改选">
+              <Button
+                size="small"
+                icon={<RobotOutlined />}
+                loading={startConverge.isPending || runningRun !== null}
+                onClick={() =>
+                  startConverge.mutate(
+                    { shotId: shot.id, maxRounds: 3, modelConfigId },
+                    {
+                      onSuccess: () => message.success('已启动 AI 自动收敛'),
+                      onError: (e) => message.error(e.message),
+                    },
+                  )
+                }
+              >
+                {runningRun !== null
+                  ? `自动收敛中（第 ${Math.max(parseAgentRounds(runningRun.roundsJson).length, 1)}/${runningRun.maxRounds} 轮）`
+                  : 'AI 自动收敛'}
+              </Button>
+            </Tooltip>
             {generating && (
               <Text type="secondary" style={{ fontSize: 12 }}>
                 {shotJob.job?.status === 'RUNNING'
@@ -549,7 +587,219 @@ function ShotKeyframeCard({
           </Space>
         </div>
       </div>
+
+      {latestRun !== null && (
+        <AgentRunPanel
+          run={latestRun}
+          shotId={shot.id}
+          patching={patching}
+          onUpdateImagePrompt={onUpdateImagePrompt}
+        />
+      )}
     </Card>
+  );
+}
+
+/** ---------- AI 自动收敛运行报告：逐轮候选图 + 评分 + 问题 + 提示词建议 ---------- */
+
+const RUN_STATUS_META: Record<AgentRunStatus, { label: string; color: string }> = {
+  RUNNING: { label: '运行中', color: 'blue' },
+  PASSED: { label: '已收敛', color: 'green' },
+  NEEDS_HUMAN: { label: '需人工确认', color: 'orange' },
+  FAILED: { label: '失败', color: 'red' },
+  CANCELED: { label: '已取消', color: 'default' },
+};
+
+function ScoreBar({ label, value }: { label: string; value: number }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 168 }}>
+      <Text type="secondary" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>
+        {label}
+      </Text>
+      <Progress
+        percent={Math.max(0, Math.min(100, value))}
+        size="small"
+        style={{ flex: 1, marginBottom: 0 }}
+        strokeColor={value >= 75 ? '#52c41a' : value >= 60 ? '#faad14' : '#ff4d4f'}
+        format={(p) => `${p ?? 0}`}
+      />
+    </div>
+  );
+}
+
+function AgentRunPanel({
+  run,
+  shotId,
+  patching,
+  onUpdateImagePrompt,
+}: {
+  run: AgentRun;
+  shotId: string;
+  patching: boolean;
+  onUpdateImagePrompt: (shotId: string, imagePrompt: string) => Promise<void>;
+}) {
+  const rounds = parseAgentRounds(run.roundsJson);
+  const meta = RUN_STATUS_META[run.status] ?? { label: run.status, color: 'default' };
+
+  const header = (
+    <Space size={6} wrap>
+      <RobotOutlined />
+      <Text style={{ fontSize: 12 }}>AI 自动收敛</Text>
+      <Tag color={meta.color}>{meta.label}</Tag>
+      {run.humanOverride && <Tag>已保留人工选择</Tag>}
+      <Text type="secondary" style={{ fontSize: 12 }}>
+        {rounds.length}/{run.maxRounds} 轮 · {new Date(run.createdAt).toLocaleString()}
+      </Text>
+    </Space>
+  );
+
+  const body = (
+    <div>
+      {run.status === 'FAILED' && (
+        <Alert
+          type="error"
+          showIcon
+          style={{ marginBottom: 8 }}
+          message="自动收敛失败"
+          description={
+            <Text style={{ fontSize: 12 }}>{run.error ?? '未知错误，可重新发起一次自动收敛'}</Text>
+          }
+        />
+      )}
+      {run.humanOverride && (
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 8 }}
+          message={
+            <Text style={{ fontSize: 12 }}>
+              运行期间你手动改过选定关键图，AI 未覆盖你的选择，只追加了候选
+            </Text>
+          }
+        />
+      )}
+      {rounds.length === 0 ? (
+        <Text type="secondary" style={{ fontSize: 12 }}>
+          {run.status === 'RUNNING' ? '正在抽第 1 轮候选…' : '本次运行没有轮次记录'}
+        </Text>
+      ) : (
+        rounds.map((r) => (
+          <div
+            key={`${r.round}-${r.takeId}`}
+            style={{
+              display: 'flex',
+              gap: 10,
+              padding: '8px 0',
+              borderTop: r.round === 1 ? 'none' : '1px solid rgba(128,128,128,0.2)',
+            }}
+          >
+            <Image
+              src={r.assetUri}
+              alt={`第 ${r.round} 轮候选`}
+              width={56}
+              height={56}
+              style={{ objectFit: 'cover', borderRadius: 4 }}
+            />
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <Space size={8} wrap style={{ marginBottom: 4 }}>
+                <Text strong style={{ fontSize: 12 }}>
+                  第 {r.round} 轮
+                </Text>
+                <ScoreBar label="形象一致性" value={r.identityMatch} />
+                <ScoreBar label="提示词匹配" value={r.promptMatch} />
+              </Space>
+              {r.issues.length > 0 && (
+                <ul style={{ margin: '2px 0 4px', paddingLeft: 18 }}>
+                  {r.issues.map((issue, i) => (
+                    <li key={i} style={{ fontSize: 12, lineHeight: 1.6 }}>
+                      {issue}
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <Text type="secondary" style={{ fontSize: 12, display: 'block' }}>
+                {r.action}
+              </Text>
+              {r.suggestedPrompt !== undefined && r.suggestedPrompt !== '' && (
+                <SuggestedPrompt
+                  suggestion={r.suggestedPrompt}
+                  shotId={shotId}
+                  patching={patching}
+                  onUpdateImagePrompt={onUpdateImagePrompt}
+                />
+              )}
+            </div>
+          </div>
+        ))
+      )}
+    </div>
+  );
+
+  return (
+    <Collapse
+      size="small"
+      ghost
+      style={{ marginTop: 8 }}
+      items={[{ key: run.id, label: header, children: body }]}
+    />
+  );
+}
+
+/**
+ * AI 改写的提示词只是「建议」——agent 绝不写回 Shot.imagePrompt，
+ * 采纳与否由人决定；采纳走页面既有的 apply-patch，产出新分镜版本。
+ */
+function SuggestedPrompt({
+  suggestion,
+  shotId,
+  patching,
+  onUpdateImagePrompt,
+}: {
+  suggestion: string;
+  shotId: string;
+  patching: boolean;
+  onUpdateImagePrompt: (shotId: string, imagePrompt: string) => Promise<void>;
+}) {
+  const [adopting, setAdopting] = useState(false);
+
+  const adopt = async () => {
+    setAdopting(true);
+    try {
+      await onUpdateImagePrompt(shotId, suggestion);
+      message.success('已采纳为镜头提示词');
+    } catch {
+      /* 失败提示已在上层给出 */
+    } finally {
+      setAdopting(false);
+    }
+  };
+
+  return (
+    <div style={{ marginTop: 6 }}>
+      <Text type="secondary" style={{ fontSize: 12 }}>
+        AI 建议的提示词
+      </Text>
+      <div
+        style={{
+          fontSize: 12,
+          lineHeight: 1.6,
+          padding: '4px 8px',
+          marginTop: 2,
+          borderRadius: 4,
+          background: 'rgba(128,128,128,0.12)',
+        }}
+      >
+        {suggestion}
+      </div>
+      <Button
+        size="small"
+        style={{ marginTop: 4 }}
+        loading={adopting || patching}
+        onClick={() => void adopt()}
+      >
+        采纳为镜头提示词
+      </Button>
+    </div>
   );
 }
 

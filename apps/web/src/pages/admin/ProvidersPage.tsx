@@ -59,12 +59,13 @@ import {
 
 const { Text, Title } = Typography;
 
-/** 模态 → 中文标签 + Tag 颜色（文本=blue/图像=purple/视频=magenta/语音=cyan） */
+/** 模态 → 中文标签 + Tag 颜色（文本=blue/图像=purple/视频=magenta/语音=cyan/视觉理解=geekblue） */
 const MODALITY_META: Record<Modality, { label: string; color: string }> = {
   text: { label: '文本', color: 'blue' },
   image: { label: '图像', color: 'purple' },
   video: { label: '视频', color: 'magenta' },
   tts: { label: '语音', color: 'cyan' },
+  vision: { label: '视觉理解', color: 'geekblue' },
 };
 
 const MODALITY_OPTIONS: Array<{ value: Modality; label: string }> = [
@@ -72,6 +73,7 @@ const MODALITY_OPTIONS: Array<{ value: Modality; label: string }> = [
   { value: 'image', label: '图像（image）' },
   { value: 'video', label: '视频（video）' },
   { value: 'tts', label: '语音（tts）' },
+  { value: 'vision', label: '视觉理解（vision）' },
 ];
 
 function ModalityTag({ modality }: { modality: Modality }) {
@@ -93,6 +95,8 @@ const CAPABILITY_TEMPLATES: Record<Modality, Record<string, unknown>> = {
     output: { resolutions: ['720p', '1080p'], maxDurationS: 10 },
   },
   tts: { modality: 'tts', input: ['prompt'], flags: { supportsVoiceReference: true } },
+  // 视觉理解：读图 + 提示词，用于关键图自动收敛的形象一致性评审
+  vision: { modality: 'vision', input: ['prompt', 'image'] },
 };
 
 function capabilityTemplate(modality: Modality): string {

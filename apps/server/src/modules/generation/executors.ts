@@ -25,6 +25,11 @@ const KeyframeInputSchema = z.object({
   shotId: z.string(),
   modelConfigId: z.string().optional(),
   size: z.string().optional(),
+  /**
+   * 本次生成改用的提示词（不写回 Shot.imagePrompt）。
+   * 自动收敛 agent 改写提示词后经此通道生效——分镜数据是人的资产，agent 只能建议不能篡改。
+   */
+  promptOverride: z.string().optional(),
 });
 
 const DesignInputSchema = z.object({
@@ -123,7 +128,8 @@ function makeKeyframeExecutor(gens: GenerationGens) {
     const modelCfg = await resolveModelCfg(db, input.modelConfigId);
     await updateProgress(10);
 
-    const rawPrompt = shot.imagePrompt || shot.sourceText;
+    // promptOverride 只在本次运行内生效，镜头上存的 imagePrompt 一字不改
+    const rawPrompt = input.promptOverride ?? (shot.imagePrompt || shot.sourceText);
     const mentions = parseMentions(rawPrompt);
     const resolved: Array<{ assetId: string; note: string; isScene: boolean; force?: boolean }> = [];
 

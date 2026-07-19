@@ -143,6 +143,57 @@ describe('GENERATE_IMAGE / kind=keyframe（假 Gen）', () => {
     expect(await db.take.count({ where: { shotId: shot.id, slot: 'KEYFRAME' } })).toBe(2);
   });
 
+  it('promptOverride：本次生成改用覆盖提示词，且不写回 Shot.imagePrompt（agent 不污染分镜数据）', async () => {
+    const { gens, imageCalls } = makeFakeGens();
+    registerGenerationExecutors(gens);
+    const exec = getExecutor('GENERATE_IMAGE')!;
+
+    const { episode, shot } = await seedShot();
+    const tag = await db.tag.create({
+      data: { projectId, type: 'CHARACTER', name: `小猴子-${crypto.randomUUID()}` },
+    });
+    await db.shotTag.create({ data: { shotId: shot.id, tagId: tag.id } });
+    const ref = await makeUploadedAsset();
+    await db.binding.create({
+      data: { episodeId: episode.id, tagId: tag.id, shotId: null, shotKey: '', assetId: ref.id },
+    });
+
+    const rewritten = '一只卡通小猴子走进教室，阳光斜照，全身入镜';
+    const ctx = await makeCtx('GENERATE_IMAGE', {
+      kind: 'keyframe',
+      shotId: shot.id,
+      promptOverride: rewritten,
+    });
+    const r = await exec(ctx);
+
+    // 生效的是覆盖值，镜头原提示词不再出现
+    expect(imageCalls[0]!.prompt).toContain(rewritten);
+    expect(imageCalls[0]!.prompt).not.toContain('男主走进教室，阳光斜照');
+    // 画风/形象一致性前缀与参考图解析逻辑完全不变
+    expect(imageCalls[0]!.prompt).toContain('【形象一致性】参考图1：');
+    expect(imageCalls[0]!.refUris).toEqual([ref.uri]);
+
+    // 铁律：分镜数据是人的资产，agent 只能建议不能篡改
+    const after = await db.shot.findUnique({ where: { id: shot.id } });
+    expect(after?.imagePrompt).toBe('男主走进教室，阳光斜照');
+
+    // 资产 meta 里记录的实际提示词也应是覆盖值（生成透明度）
+    const asset = await db.asset.findUnique({ where: { id: r.outputAssetIds![0]! } });
+    expect(parseJson<{ effectivePrompt?: string }>(asset!.metaJson, {}).effectivePrompt).toContain(
+      rewritten,
+    );
+  });
+
+  it('未传 promptOverride 时行为不变：仍用 Shot.imagePrompt', async () => {
+    const { gens, imageCalls } = makeFakeGens();
+    registerGenerationExecutors(gens);
+    const { shot } = await seedShot();
+    await getExecutor('GENERATE_IMAGE')!(
+      await makeCtx('GENERATE_IMAGE', { kind: 'keyframe', shotId: shot.id }),
+    );
+    expect(imageCalls[0]!.prompt).toContain('男主走进教室，阳光斜照');
+  });
+
   it('镜头级覆盖绑定优先于标签级默认', async () => {
     const { gens, imageCalls } = makeFakeGens();
     registerGenerationExecutors(gens);

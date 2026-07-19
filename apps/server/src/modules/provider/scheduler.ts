@@ -10,10 +10,11 @@ import { chatComplete } from './adapters/openai-compatible.js';
 export type ModelWithProvider = ModelConfig & { provider: ProviderConfig };
 
 /**
- * 自动调度覆盖已有真实适配器的模态（text/image/tts）。
+ * 自动调度覆盖已有真实适配器的模态（text/image/tts/vision）。
+ * vision（视觉评审）单次调用便宜，允许自动调度，免得用户为每次评审手动选模型。
  * video 刻意保持显式选择：单次成本高，由用户在视频页明确指定模型。
  */
-export const AUTO_ROUTE_MODALITIES: Modality[] = ['text', 'image', 'tts'];
+export const AUTO_ROUTE_MODALITIES: Modality[] = ['text', 'image', 'tts', 'vision'];
 
 /** 该模态的调度候选队列：已启用厂商（有 baseUrl）× 已启用模型，按 sortOrder 升序 */
 export async function pickCandidates(db: PrismaClient, modality: Modality): Promise<ModelWithProvider[]> {

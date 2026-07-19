@@ -6,7 +6,7 @@ import type { PrismaClient } from '@prisma/client';
 import { registerErrorHandler, badRequest } from './lib/errors.js';
 import { STORAGE_ROOT } from './lib/storage.js';
 import { db as defaultDb } from './lib/db.js';
-import { parseJson } from './lib/json.js';
+import { parseJson, toJson } from './lib/json.js';
 
 import { projectRoutes } from './modules/project/routes.js';
 import { episodeRoutes } from './modules/episode/routes.js';
@@ -21,18 +21,27 @@ import { storyboardRoutes } from './modules/storyboard/routes.js';
 import { designRoutes } from './modules/design/routes.js';
 import { dubbingRoutes } from './modules/dubbing/routes.js';
 import { generationRoutes } from './modules/generation/routes.js';
+import { agentRoutes } from './modules/agent/routes.js';
 import { cutRoutes } from './modules/cut/routes.js';
 import { libraryRoutes } from './modules/cut/library-routes.js';
 
-import { enqueueJob } from './modules/job/service.js';
+import { enqueueJob, completeJob, failJob, updateJobProgress } from './modules/job/service.js';
 import { startWorker, type JobWorker } from './modules/job/worker.js';
-import { registerExecutor } from './modules/job/registry.js';
+import { registerExecutor, getExecutor } from './modules/job/registry.js';
 import { createStoryboardGenerator } from './modules/script/generate.js';
 import { createScriptChat } from './modules/script/chat.js';
 import { shotGroupRoutes } from './modules/shotgroup/routes.js';
 import { enhanceRoutes } from './modules/enhance/routes.js';
 import { registerEnhanceExecutors } from './modules/enhance/executors.js';
 import { chatComplete } from './modules/provider/adapters/openai-compatible.js';
+import { visionJudge } from './modules/provider/adapters/vision-judge.js';
+import { registerAgentExecutors } from './modules/agent/executor.js';
+import { recoverStaleAgentRuns } from './modules/agent/service.js';
+import type {
+  AgentKeyframeGen,
+  AgentTextGen,
+  AgentVisionJudge,
+} from './modules/agent/service.js';
 import { openaiImageGenerate } from './modules/provider/adapters/openai-image.js';
 import { arkVideoGenerate } from './modules/provider/adapters/ark-video.js';
 import { uriToAbsPath } from './lib/storage.js';
@@ -44,6 +53,87 @@ import { findOrCreateTags } from './modules/tag/service.js';
 import * as stale from './modules/stale/service.js';
 import { createFailoverTextGen, pickModelForModality, AUTO_ROUTE_MODALITIES } from './modules/provider/scheduler.js';
 import type { Modality } from '@ovideo/shared';
+
+/* ---------------- 关键图自动收敛 agent 的真实能力接线 ---------------- */
+
+/**
+ * agent 的取图能力 = 人点「生成关键图」时的同一个执行器。
+ * 【旁路原则】不为 agent 新增生成路径：同样落一条 GENERATE_IMAGE 的 Job 行、同样产出普通 Take，
+ * 因此 agent 抽出来的每张图在任务面板与抽卡列表里与人工产出完全同形，人随时可改选。
+ */
+const agentKeyframeGen: AgentKeyframeGen = async ({
+  db,
+  projectId,
+  shotId,
+  modelConfigId,
+  promptOverride,
+}) => {
+  const executor = getExecutor('GENERATE_IMAGE');
+  if (!executor) throw new Error('图像生成执行器未注册，无法运行自动收敛');
+  // 人工入队时由 enqueue 自动调度队首图像模型；agent 直接驱动执行器，这里补上同样的调度
+  let imageModelId = modelConfigId;
+  if (!imageModelId) {
+    const picked = await pickModelForModality(db, 'image');
+    imageModelId = picked?.id;
+  }
+  const job = await db.job.create({
+    data: {
+      projectId,
+      type: 'GENERATE_IMAGE',
+      executor: 'API',
+      status: 'RUNNING',
+      attempts: 1,
+      startedAt: new Date(),
+      inputJson: toJson({ kind: 'keyframe', shotId, modelConfigId: imageModelId, promptOverride }),
+    },
+  });
+  try {
+    const result = await executor({
+      db,
+      job,
+      updateProgress: (p) => updateJobProgress(db, job.id, p),
+    });
+    await completeJob(db, job.id, result ?? {});
+    const takeId = (result.output as { takeId?: string } | undefined)?.takeId;
+    if (!takeId) throw new Error('关键图生成未返回 take');
+    const take = await db.take.findUnique({ where: { id: takeId }, include: { asset: true } });
+    if (!take) throw new Error('关键图 take 落库后读取失败');
+    return { takeId: take.id, assetUri: take.asset.uri };
+  } catch (err) {
+    // fatal：这条 Job 由 agent 同步驱动，留给 worker 重试会凭空多抽一张图（多花一次钱）
+    await failJob(db, job.id, err instanceof Error ? err.message : String(err), { fatal: true });
+    throw err;
+  }
+};
+
+/** 视觉评审：显式指定优先，否则按 modality='vision' 调度队首；一个都没有时给出可行动的中文指引 */
+const agentVisionJudge: AgentVisionJudge = async ({
+  db,
+  imagePath,
+  refImagePaths,
+  prompt,
+  visionModelConfigId,
+}) => {
+  const model = visionModelConfigId
+    ? await db.modelConfig.findUnique({
+        where: { id: visionModelConfigId },
+        include: { provider: true },
+      })
+    : await pickModelForModality(db, 'vision');
+  if (!model || !model.enabled || !model.provider.enabled || !model.provider.baseUrl) {
+    throw new Error(
+      '未配置视觉理解模型：请到管理后台把一个视觉模型（如豆包视觉理解 Pro / Qwen-VL）的模态设为「视觉理解」并启用后重试',
+    );
+  }
+  const cfg = { baseUrl: model.provider.baseUrl, apiKey: model.provider.apiKey, modelKey: model.key };
+  return visionJudge(cfg, { imagePath, refImagePaths, prompt, modelCfg: cfg });
+};
+
+/** 提示词改写走既有文本通道（按需调度 + 失效转移 + jsonMode），与对话式剧本同一套策略 */
+const agentTextGen: AgentTextGen = async ({ db, prompt }) =>
+  createFailoverTextGen(db, async () => {
+    throw new Error('未配置文本模型：请在管理后台「一键接入」任一文本厂商后再使用提示词改写');
+  })(prompt);
 
 /**
  * 集成装配：模块间协作全部在这里接线（模块彼此不 import，见各模块 options 注释）。
@@ -108,6 +198,11 @@ export function registerExecutors(): void {
   registerGenerationExecutors({ imageGen: smartImageGen, videoGen: smartVideoGen, ttsGen: smartTtsGen });
   registerCutExecutor();
   registerEnhanceExecutors();
+  registerAgentExecutors({
+    generateKeyframe: agentKeyframeGen,
+    judgeImage: agentVisionJudge,
+    textGen: agentTextGen,
+  });
 
   registerExecutor('GENERATE_STORYBOARD', async (ctx) => {
     const input = parseJson<{ scriptDraftId?: string; modelConfigId?: string }>(
@@ -258,6 +353,8 @@ export async function buildApp(opts: BuildAppOptions = {}) {
   await app.register(designRoutes, { db, enqueue });
   await app.register(dubbingRoutes, { db, enqueue });
   await app.register(generationRoutes, { db, enqueue });
+  // 自动收敛 agent：与「生成关键图」并列的新入口，原有按钮行为完全不变
+  await app.register(agentRoutes, { db, enqueue });
   await app.register(cutRoutes, { db, enqueue });
   await app.register(libraryRoutes, { db });
   await app.register(shotGroupRoutes, { db });
@@ -269,5 +366,11 @@ export async function buildApp(opts: BuildAppOptions = {}) {
 /** 供 index.ts 启动完整服务（HTTP + 执行器 + Worker） */
 export function startRuntime(db: PrismaClient): JobWorker {
   registerExecutors();
+  // agent 运行记录与 Job 一样会留下重启孤儿；不清扫会永久堵死该镜头的后续发起
+  void recoverStaleAgentRuns(db)
+    .then((n) => {
+      if (n > 0) console.warn(`[agent] 启动恢复：${n} 个中断的自动收敛已标记失败`);
+    })
+    .catch((err) => console.error('[agent] 启动恢复失败：', err));
   return startWorker(db, { intervalMs: 400, concurrency: 2 });
 }

@@ -39,6 +39,9 @@ export function defaultCapabilityFor(modality: Modality): CapabilityDescriptor {
       return { modality: 'video', input: ['prompt', 'first_frame'], output: { maxDurationS: 15 } };
     case 'tts':
       return { modality: 'tts', input: ['prompt'] };
+    case 'vision':
+      // 视觉理解：吃提示词 + 待评审/参考图，产出文本判定（不产图）
+      return { modality: 'vision', input: ['prompt', 'image'] };
   }
 }
 
