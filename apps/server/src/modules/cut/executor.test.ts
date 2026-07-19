@@ -150,6 +150,63 @@ describe('COMPOSE_CUT 执行器（真 ffmpeg）', () => {
   });
 
   it(
+    '背景音乐：0.5s BGM 循环铺满 2s 静音成片（结尾窗口仍有声）、血缘含 BGM 资产',
+    async () => {
+      const draft = await t.db.scriptDraft.create({ data: { episodeId, isMain: false } });
+      const sb = await t.db.storyboard.create({
+        data: { episodeId, scriptDraftId: draft.id, version: 20 },
+      });
+      // 无音轨视频（转码补静音）——成片里能听到的只有 BGM
+      const silent = allocFilePath(projectId, 'mp4');
+      await runFfmpeg([
+        '-y', '-f', 'lavfi', '-i', 'color=c=teal:s=720x1280:d=2:r=24',
+        '-c:v', 'libx264', '-pix_fmt', 'yuv420p', silent.absPath,
+      ]);
+      const videoAsset = await t.db.asset.create({
+        data: {
+          projectId, type: 'VIDEO', source: 'GENERATED', uri: silent.uri, mime: 'video/mp4',
+          sizeBytes: fileSize(silent.absPath), durationMs: await probeDurationMs(silent.absPath),
+        },
+      });
+      const shot = await t.db.shot.create({
+        data: { storyboardId: sb.id, sortOrder: 0, sourceText: 'BGM 镜头' },
+      });
+      const take = await t.db.take.create({
+        data: { shotId: shot.id, slot: 'VIDEO', assetId: videoAsset.id },
+      });
+      await t.db.shot.update({ where: { id: shot.id }, data: { videoSelectedTakeId: take.id } });
+
+      const bgmWav = allocFilePath(projectId, 'wav');
+      await makeSineWav({ outPath: bgmWav.absPath, durationMs: 500, freq: 330 });
+      const bgmAsset = await t.db.asset.create({
+        data: {
+          projectId, type: 'AUDIO', source: 'UPLOADED', uri: bgmWav.uri, mime: 'audio/wav',
+          sizeBytes: fileSize(bgmWav.absPath), durationMs: 500,
+        },
+      });
+
+      const cut = await createCut(t.db, { episodeId, storyboardId: sb.id });
+      const job = await makeJob({ cutId: cut.id, bgmAssetId: bgmAsset.id, bgmVolume: 0.5 });
+      const result = await composeCut({ db: t.db, job, updateProgress: async () => {} });
+      const out = await t.db.asset.findUnique({ where: { id: result.outputAssetIds![0] } });
+      const outAbs = uriToAbsPath(out!.uri);
+
+      // 循环铺满：1.2~1.7s 窗口（远超 BGM 原始 0.5s）仍能检出声音
+      const tail = await runFfmpeg([
+        '-ss', '1.2', '-t', '0.5', '-i', outAbs,
+        '-map', '0:a:0', '-af', 'volumedetect', '-f', 'null', '-',
+      ]);
+      const mean = /mean_volume:\s*(-?[\d.]+) dB/.exec(tail);
+      expect(parseFloat(mean![1])).toBeGreaterThan(-50);
+
+      // 血缘含 BGM 资产
+      const parents = await t.db.assetParent.findMany({ where: { childId: out!.id } });
+      expect(parents.map((p) => p.parentId)).toContain(bgmAsset.id);
+    },
+    120_000,
+  );
+
+  it(
     '配音时间轴精确对齐：视频过长按台词裁剪，过短末帧定格补足（头 200ms + 行间 300ms + 尾 500ms）',
     async () => {
       const mkShot = async (videoMs: number, lineMs: number[], version: number) => {

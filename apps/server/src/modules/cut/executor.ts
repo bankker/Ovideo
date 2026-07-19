@@ -28,6 +28,9 @@ const ComposeCutInputSchema = z.object({
   audioMixMode: z.enum(['SMART', 'DUCK', 'MIX']).default('SMART'),
   // AUTO=画布跟随首个片段的实际分辨率（默认）；显式比例用固定画布
   ratio: z.enum(['AUTO', '9:16', '16:9', '1:1', '3:4', '4:3']).default('AUTO'),
+  // 背景音乐：铺满全片（短则循环、长则截断），结尾 2s 淡出；音量为相对台词的系数
+  bgmAssetId: z.string().min(1).optional(),
+  bgmVolume: z.number().min(0.05).max(1).default(0.25),
 });
 
 /** 显式比例 → 固定画布 */
@@ -90,13 +93,11 @@ export function registerCutExecutor(): void {
 
 export const composeCut: JobExecutor = async (ctx) => {
   const { db, job } = ctx;
-  const { cutId, audioMixMode, ratio } = ComposeCutInputSchema.parse(
-    parseJson<Record<string, unknown>>(job.inputJson, {}),
-  );
-  const cut = await db.cut.findUnique({ where: { id: cutId } });
+  const input = ComposeCutInputSchema.parse(parseJson<Record<string, unknown>>(job.inputJson, {}));
+  const cut = await db.cut.findUnique({ where: { id: input.cutId } });
   if (!cut) throw notFound('成片');
   try {
-    return await doCompose(ctx, cut, audioMixMode, ratio);
+    return await doCompose(ctx, cut, input);
   } catch (err) {
     // 失败先落 Cut 状态再 rethrow：Job 面板与美化页都能看到失败态
     await db.cut
@@ -109,13 +110,22 @@ export const composeCut: JobExecutor = async (ctx) => {
 async function doCompose(
   ctx: JobExecutorContext,
   cut: Cut,
-  audioMixMode: 'SMART' | 'DUCK' | 'MIX',
-  ratio: 'AUTO' | '9:16' | '16:9' | '1:1' | '3:4' | '4:3',
+  input: z.infer<typeof ComposeCutInputSchema>,
 ): Promise<JobExecutorResult> {
   const { db, job, updateProgress } = ctx;
+  const { audioMixMode, ratio, bgmAssetId, bgmVolume } = input;
   const items = parseJson<CutItem[]>(cut.itemsJson, []);
   if (items.length === 0) throw badRequest('成片没有可合成的片段');
   const canvas = await resolveCanvas(ratio, uriToAbsPath(items[0].uri));
+
+  // BGM 资产解析（执行时实时读，缺失给明确中文错误）
+  let bgmAbsPath: string | null = null;
+  if (bgmAssetId !== undefined) {
+    const bgm = await db.asset.findUnique({ where: { id: bgmAssetId } });
+    if (!bgm) throw notFound('背景音乐资产');
+    bgmAbsPath = uriToAbsPath(bgm.uri);
+    if (!fs.existsSync(bgmAbsPath)) throw badRequest(`背景音乐文件不存在：${bgm.uri}`);
+  }
   // 配音快照按镜头分组（组内已按台词顺序排好）
   const audioLines = parseJson<CutAudioLine[]>(cut.audioTracksJson, []);
   const audioByShot = new Map<string, CutAudioLine[]>();
@@ -154,9 +164,17 @@ async function doCompose(
     // 2) concat demuxer 合并（文件列表写临时 txt，路径转义单引号）
     const listPath = path.join(tmpDir, 'concat.txt');
     fs.writeFileSync(listPath, segPaths.map((p) => `file '${escapeConcatPath(p)}'`).join('\n'), 'utf8');
-    const out = allocFilePath(job.projectId, 'mp4');
-    await runFfmpeg(['-y', '-f', 'concat', '-safe', '0', '-i', listPath, '-c', 'copy', out.absPath]);
+    const concatPath = path.join(tmpDir, 'concat.mp4');
+    await runFfmpeg(['-y', '-f', 'concat', '-safe', '0', '-i', listPath, '-c', 'copy', concatPath]);
     await updateProgress(80);
+
+    // 2.5) 背景音乐铺底：循环补长/超长截断、限幅音量、结尾 2s 淡出；无 BGM 直接落盘
+    const out = allocFilePath(job.projectId, 'mp4');
+    if (bgmAbsPath !== null) {
+      await mixBgm(concatPath, bgmAbsPath, out.absPath, bgmVolume);
+    } else {
+      fs.copyFileSync(concatPath, out.absPath);
+    }
 
     // 3) 探测时长 + 500ms 处抽帧做缩略图（片子比 500ms 还短时取中点兜底）
     const durationMs = await probeDurationMs(out.absPath);
@@ -165,9 +183,13 @@ async function doCompose(
     await extractFrame({ videoPath: out.absPath, timeMs: thumbAtMs, outPath: thumb.absPath });
     await updateProgress(90);
 
-    // 4) FINAL 资产：血缘 parents = 全部片段资产 + 配音音频资产（付费产物永不物理删除的溯源基础）
+    // 4) FINAL 资产：血缘 parents = 全部片段资产 + 配音音频资产 + BGM（付费产物永不物理删除的溯源基础）
     const parentIds = [
-      ...new Set([...items.map((it) => it.assetId), ...audioLines.map((l) => l.assetId)]),
+      ...new Set([
+        ...items.map((it) => it.assetId),
+        ...audioLines.map((l) => l.assetId),
+        ...(bgmAssetId !== undefined ? [bgmAssetId] : []),
+      ]),
     ];
     const asset = await createAsset(db, {
       projectId: job.projectId,
@@ -181,7 +203,12 @@ async function doCompose(
       durationMs,
       jobId: job.id,
       parentIds,
-      meta: { cutId: cut.id, segmentCount: items.length, dubbedLineCount: audioLines.length },
+      meta: {
+        cutId: cut.id,
+        segmentCount: items.length,
+        dubbedLineCount: audioLines.length,
+        ...(bgmAssetId !== undefined ? { bgm: { assetId: bgmAssetId, volume: bgmVolume } } : {}),
+      },
     });
     // createAsset 不收 thumbUri（M1 冻结接口），补一笔 update
     await db.asset.update({ where: { id: asset.id }, data: { thumbUri: thumb.uri } });
@@ -256,6 +283,33 @@ async function fitSegmentDuration(
     outPath,
   ]);
   return true;
+}
+
+/**
+ * 背景音乐铺底：BGM 无限循环喂入，amix duration=first 以视频长度封口（短则循环、长则截断），
+ * 音量按系数压低垫在台词下方，结尾 2s 淡出。视频流 copy 不二压。
+ */
+async function mixBgm(
+  videoPath: string,
+  bgmPath: string,
+  outPath: string,
+  volume: number,
+): Promise<void> {
+  const durationMs = await probeDurationMs(videoPath);
+  const fadeStartS = Math.max(0, durationMs / 1000 - 2).toFixed(2);
+  const fc =
+    `[1:a]aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo,` +
+    `volume=${volume},afade=t=out:st=${fadeStartS}:d=2[bgm];` +
+    `[0:a][bgm]amix=inputs=2:duration=first:normalize=0[aout]`;
+  await runFfmpeg([
+    '-y',
+    '-i', videoPath,
+    '-stream_loop', '-1', '-i', bgmPath,
+    '-filter_complex', fc,
+    '-map', '0:v', '-map', '[aout]',
+    '-c:v', 'copy', '-c:a', 'aac', '-ar', '44100', '-ac', '2',
+    outPath,
+  ]);
 }
 
 /**

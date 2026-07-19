@@ -3,7 +3,7 @@ import type { FastifyPluginAsync } from 'fastify';
 import type { PrismaClient } from '@prisma/client';
 import type { JobExecutorKind, JobType } from '@ovideo/shared';
 import { z } from 'zod';
-import { notFound } from '../../lib/errors.js';
+import { badRequest, notFound } from '../../lib/errors.js';
 import { createCut, getCut, listCuts } from './service.js';
 
 /** 任务入队函数：由集成阶段注入 job 模块的 enqueueJob，保持模块解耦 */
@@ -30,6 +30,9 @@ const CreateCutBodySchema = z.object({
   storyboardId: z.string().min(1),
   audioMixMode: AudioMixModeSchema.default('SMART'),
   ratio: CutRatioSchema.default('AUTO'),
+  /** 背景音乐：项目资产库中的音频资产 id（可选）；音量为相对台词的系数 */
+  bgmAssetId: z.string().min(1).optional(),
+  bgmVolume: z.number().min(0.05).max(1).default(0.25),
 });
 
 export const cutRoutes: FastifyPluginAsync<CutRoutesOptions> = async (app, { db, enqueue }) => {
@@ -40,12 +43,26 @@ export const cutRoutes: FastifyPluginAsync<CutRoutesOptions> = async (app, { db,
     const episode = await db.episode.findUnique({ where: { id } });
     if (!episode) throw notFound('分集');
 
+    // BGM 校验：必须是本项目资产库里的音频资产
+    if (body.bgmAssetId !== undefined) {
+      const bgm = await db.asset.findUnique({ where: { id: body.bgmAssetId } });
+      if (!bgm || bgm.projectId !== episode.projectId) throw notFound('背景音乐资产');
+      if (bgm.type !== 'AUDIO') throw badRequest('背景音乐必须是音频资产');
+    }
+
     const created = await createCut(db, { episodeId: id, storyboardId: body.storyboardId });
     const job = await enqueue({
       projectId: episode.projectId,
       type: 'COMPOSE_CUT',
       executor: 'LOCAL',
-      inputPayload: { cutId: created.id, audioMixMode: body.audioMixMode, ratio: body.ratio },
+      inputPayload: {
+        cutId: created.id,
+        audioMixMode: body.audioMixMode,
+        ratio: body.ratio,
+        ...(body.bgmAssetId !== undefined
+          ? { bgmAssetId: body.bgmAssetId, bgmVolume: body.bgmVolume }
+          : {}),
+      },
     });
     reply.code(202);
     return { cut: await getCut(db, created.id), job };

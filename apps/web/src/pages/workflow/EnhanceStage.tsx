@@ -12,9 +12,10 @@ import {
   Tag,
   Tooltip,
   Typography,
+  Upload,
   message,
 } from 'antd';
-import { MergeCellsOutlined, VideoCameraOutlined } from '@ant-design/icons';
+import { MergeCellsOutlined, UploadOutlined, VideoCameraOutlined } from '@ant-design/icons';
 import type { CutStatus } from '@ovideo/shared';
 import { useStoryboards } from '../../api/workflow-hooks';
 import {
@@ -22,7 +23,10 @@ import {
   useCreateCut,
   useCuts,
   useGenJob,
+  useProjectAudioAssets,
   useStoryboardTakes,
+  useUploadProjectAsset,
+  type AssetEntity,
   type AudioMixMode,
   type CutRatio,
   type ShotWithTakes,
@@ -39,9 +43,29 @@ const CUT_STATUS_TAG: Record<CutStatus, { color: string; label: string }> = {
   FAILED: { color: 'error', label: '失败' },
 };
 
+/** BGM 候选的展示名：上传时的原始文件名，缺失时回落资产 id 片段 */
+function audioAssetLabel(a: AssetEntity): string {
+  try {
+    const meta = JSON.parse(a.metaJson) as { originalName?: string };
+    if (meta.originalName) return meta.originalName;
+  } catch {
+    /* 落到兜底 */
+  }
+  return `音频 ${a.id.slice(-6)}`;
+}
+
+const BGM_VOLUME_OPTIONS = [
+  { value: 0.1, label: '音量 10%' },
+  { value: 0.15, label: '音量 15%' },
+  { value: 0.25, label: '音量 25%' },
+  { value: 0.4, label: '音量 40%' },
+  { value: 0.6, label: '音量 60%' },
+  { value: 1, label: '音量 100%' },
+];
+
 /** 美化阶段（M3 v2.0 最小集）：选定视频片段清单 + 拼接合成成片 + 历史 Cut */
 export function EnhanceStage() {
-  const { episodeId = '' } = useParams();
+  const { projectId = '', episodeId = '' } = useParams();
   const qc = useQueryClient();
 
   /* ---------- 版本选择 → 分镜详情 ---------- */
@@ -80,6 +104,13 @@ export function EnhanceStage() {
   const createCut = useCreateCut(episodeId);
   const [audioMixMode, setAudioMixMode] = useState<AudioMixMode>('SMART');
   const [cutRatio, setCutRatio] = useState<CutRatio>('AUTO');
+
+  /* ---------- 背景音乐：项目资产库音频 + 上传 + 音量 ---------- */
+  const audioAssetsQuery = useProjectAudioAssets(projectId);
+  const audioAssets = audioAssetsQuery.data ?? [];
+  const uploadAsset = useUploadProjectAsset(projectId);
+  const [bgmAssetId, setBgmAssetId] = useState<string | undefined>(undefined);
+  const [bgmVolume, setBgmVolume] = useState(0.25);
   const [composeJobId, setComposeJobId] = useState<string | null>(null);
   const jobQuery = useGenJob(composeJobId, 2000);
   const job = jobQuery.data;
@@ -112,7 +143,12 @@ export function EnhanceStage() {
       return;
     }
     createCut.mutate(
-      { storyboardId: selectedStoryboardId, audioMixMode, ratio: cutRatio },
+      {
+        storyboardId: selectedStoryboardId,
+        audioMixMode,
+        ratio: cutRatio,
+        ...(bgmAssetId !== undefined ? { bgmAssetId, bgmVolume } : {}),
+      },
       {
         onSuccess: ({ job: j }) => {
           message.success('已提交合成任务');
@@ -193,6 +229,50 @@ export function EnhanceStage() {
                 { value: 'MIX', label: '原声配音叠加' },
               ]}
             />
+            <Tooltip title="背景音乐：循环铺满全片压在台词下方，结尾自动淡出 2 秒">
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                音乐
+              </Text>
+            </Tooltip>
+            <Select
+              size="small"
+              allowClear
+              style={{ width: 168 }}
+              placeholder="无背景音乐"
+              value={bgmAssetId}
+              onChange={(v: string | undefined) => setBgmAssetId(v)}
+              options={audioAssets.map((a) => ({ value: a.id, label: audioAssetLabel(a) }))}
+            />
+            <Upload
+              accept="audio/*"
+              showUploadList={false}
+              customRequest={({ file, onSuccess, onError }) => {
+                uploadAsset.mutate(file as File, {
+                  onSuccess: (asset) => {
+                    message.success('音乐已上传并选用');
+                    setBgmAssetId(asset.id);
+                    onSuccess?.(asset);
+                  },
+                  onError: (e) => {
+                    message.error(e.message);
+                    onError?.(e);
+                  },
+                });
+              }}
+            >
+              <Tooltip title="上传音乐文件（mp3/wav/m4a…）">
+                <Button size="small" icon={<UploadOutlined />} loading={uploadAsset.isPending} />
+              </Tooltip>
+            </Upload>
+            {bgmAssetId !== undefined && (
+              <Select
+                size="small"
+                style={{ width: 104 }}
+                value={bgmVolume}
+                onChange={(v: number) => setBgmVolume(v)}
+                options={BGM_VOLUME_OPTIONS}
+              />
+            )}
           </Space>
           <Tooltip
             title={

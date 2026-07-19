@@ -10,7 +10,7 @@ import type {
   StaleReason,
   TakeSlot,
 } from '@ovideo/shared';
-import { api } from './client';
+import { api, apiUpload } from './client';
 import type { JobEntity, ShotDetail, StoryboardDetail } from './workflow-hooks';
 
 /** ---------- 响应实体类型（形状 = Prisma 模型） ---------- */
@@ -223,6 +223,29 @@ export function useGenerateShotVideo() {
   });
 }
 
+/** ---------- 背景音乐（项目资产库中已上传的音频） ---------- */
+
+export function useProjectAudioAssets(projectId: string) {
+  return useQuery({
+    queryKey: ['project-audio-assets', projectId],
+    queryFn: () => api<AssetEntity[]>(`/projects/${projectId}/assets`, { query: { type: 'AUDIO' } }),
+    enabled: projectId !== '',
+    // 只列上传的音乐文件；TTS 生成的台词音频不做 BGM 候选
+    select: (list) => list.filter((a) => a.source === 'UPLOADED'),
+  });
+}
+
+/** 上传文件进项目资产库（mime 自动归类）；成功后刷新 BGM 候选列表 */
+export function useUploadProjectAsset(projectId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (file: File) => apiUpload<AssetEntity>(`/projects/${projectId}/assets/upload`, file),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['project-audio-assets', projectId] });
+    },
+  });
+}
+
 /** ---------- 成片 Cut ---------- */
 
 export function useCuts(episodeId: string) {
@@ -262,10 +285,16 @@ export function useCreateCut(episodeId: string) {
       storyboardId,
       audioMixMode,
       ratio,
+      bgmAssetId,
+      bgmVolume,
     }: {
       storyboardId: string;
       audioMixMode?: AudioMixMode;
       ratio?: CutRatio;
+      /** 背景音乐资产 id（项目资产库音频）；不传 = 无 BGM */
+      bgmAssetId?: string;
+      /** BGM 相对台词的音量系数 0.05~1 */
+      bgmVolume?: number;
     }) =>
       api<CreateCutResult>(`/episodes/${episodeId}/cuts`, {
         method: 'POST',
@@ -273,6 +302,8 @@ export function useCreateCut(episodeId: string) {
           storyboardId,
           ...(audioMixMode !== undefined ? { audioMixMode } : {}),
           ...(ratio !== undefined ? { ratio } : {}),
+          ...(bgmAssetId !== undefined ? { bgmAssetId } : {}),
+          ...(bgmVolume !== undefined ? { bgmVolume } : {}),
         },
       }),
     onSuccess: () => {
