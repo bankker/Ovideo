@@ -49,12 +49,13 @@ const TAG_COLOR: Record<TagType, string> = {
 /** 画面比例 → 图像生成尺寸（与服务端图像生成契约一致） */
 type AspectRatio = '9:16' | '16:9' | '1:1' | '3:4' | '4:3';
 
+// 2K 档：满足 Seedream 4.5/5.0 的最小像素要求（≥368.6 万），4.0 兼容且按张计费不加价
 const RATIO_TO_SIZE: Record<AspectRatio, string> = {
-  '9:16': '1024x1792',
-  '16:9': '1792x1024',
-  '1:1': '1024x1024',
-  '3:4': '864x1152',
-  '4:3': '1152x864',
+  '9:16': '1440x2560',
+  '16:9': '2560x1440',
+  '1:1': '2048x2048',
+  '3:4': '1728x2304',
+  '4:3': '2304x1728',
 };
 
 const RATIO_OPTIONS = (Object.keys(RATIO_TO_SIZE) as AspectRatio[]).map((r) => ({
