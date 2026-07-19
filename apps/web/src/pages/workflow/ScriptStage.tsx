@@ -1,4 +1,11 @@
-import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type Dispatch,
+  type SetStateAction,
+} from 'react';
 import { useParams } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import {
@@ -23,6 +30,8 @@ import {
   DeleteOutlined,
   DoubleLeftOutlined,
   DoubleRightOutlined,
+  ArrowLeftOutlined,
+  BulbOutlined,
   EditOutlined,
   PlusOutlined,
   SendOutlined,
@@ -52,6 +61,7 @@ import {
 import { TagDedup } from '../../components/TagDedup';
 import { useCapabilities } from '../../api/produce-hooks';
 import { useScriptChat } from '../../api/chat-hooks';
+import { ScriptStarter } from './ScriptStarter';
 
 const { Text, Paragraph } = Typography;
 
@@ -85,6 +95,8 @@ export function ScriptStage() {
   const [selectedDraftId, setSelectedDraftId] = useState<string | null>(null);
   const [content, setContent] = useState('');
   const loadedDraftRef = useRef<string | null>(null);
+  /** 刚由 AI 生成、正文尚未到达的草稿 id：正文到达后补载入一次，随即清空 */
+  const awaitingContentRef = useRef<string | null>(null);
   const [renameState, setRenameState] = useState<{ id: string; title: string } | null>(null);
 
   // 默认选中主剧本；选中项被删时回退
@@ -97,10 +109,20 @@ export function ScriptStage() {
 
   const selectedDraft = drafts?.find((d) => d.id === selectedDraftId) ?? null;
 
-  // 切换选中稿时载入内容（不覆盖正在输入的文本）
+  // 切换选中稿时载入内容（不覆盖正在输入的文本）。
+  // AI 生成走的是"先建空稿 → Job 把正文写回同一条草稿"，草稿 id 不变、内容后到，
+  // 因此对刚生成的那一份额外补一次载入——只补一次、且只在正文真的到达后，
+  // 不依赖 invalidate 与 effect 的 flush 先后顺序。
   useEffect(() => {
-    if (selectedDraft !== null && loadedDraftRef.current !== selectedDraft.id) {
+    if (selectedDraft === null) return;
+    if (loadedDraftRef.current !== selectedDraft.id) {
       loadedDraftRef.current = selectedDraft.id;
+      setContent(selectedDraft.content);
+      if (selectedDraft.content !== '') awaitingContentRef.current = null;
+      return;
+    }
+    if (awaitingContentRef.current === selectedDraft.id && selectedDraft.content !== '') {
+      awaitingContentRef.current = null;
       setContent(selectedDraft.content);
     }
   }, [selectedDraft]);
@@ -122,11 +144,33 @@ export function ScriptStage() {
     createDraft.mutate(
       { title: `剧本稿 ${(drafts?.length ?? 0) + 1}` },
       {
-        onSuccess: (d) => setSelectedDraftId(d.id),
+        onSuccess: (d) => {
+          setSelectedDraftId(d.id);
+          setStarterOpen(false); // 手工新建 → 直接进编辑器
+        },
         onError: (e) => message.error(e.message),
       },
     );
   };
+
+  /* ---------- 「从想法开始」入口（新增路径，不影响手工粘贴/编辑链路） ---------- */
+  /** 编辑 / 对话模式（声明在此以便创作入口完成后切回编辑器） */
+  const [mode, setMode] = useState<'edit' | 'chat'>('edit');
+  const [starterOpen, setStarterOpen] = useState(false);
+  const hasDrafts = (drafts?.length ?? 0) > 0;
+  // 一条剧本稿都没有时，创作入口就是这一屏的主视觉（新用户的第一印象）
+  const showStarter = !draftsQuery.isLoading && (!hasDrafts || starterOpen);
+
+  /** 生成完成 / 导入成功 → 选中该稿并切回编辑器 */
+  const handleStarterCreated = useCallback((draftId: string) => {
+    setSelectedDraftId(draftId);
+    loadedDraftRef.current = null; // 强制重新载入正文（内容是刚由服务端写回的）
+    // 正文可能还没随查询回来，登记等待——到达后由载入 effect 补一次
+    awaitingContentRef.current = draftId;
+    setStarterOpen(false);
+    setMode('edit');
+    message.success('剧本已生成，可继续编辑或直接「三步生成分镜」');
+  }, []);
 
   const handleSetMain = (draftId: string) => {
     updateDraft.mutate(
@@ -277,7 +321,6 @@ export function ScriptStage() {
     }));
 
   /* ---------- 对话修改模式（M3-lite，v2 §4） ---------- */
-  const [mode, setMode] = useState<'edit' | 'chat'>('edit');
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
 
   /* ---------- 布局 ---------- */
@@ -300,14 +343,24 @@ export function ScriptStage() {
         styles={{ body: { flex: 1, overflowY: 'auto', padding: 8 } }}
         actions={[
           <Button
+            key="starter"
+            type="link"
+            size="small"
+            icon={<BulbOutlined />}
+            disabled={showStarter}
+            onClick={() => setStarterOpen(true)}
+          >
+            AI 生成
+          </Button>,
+          <Button
             key="create"
-            type="dashed"
+            type="link"
             size="small"
             icon={<PlusOutlined />}
             loading={createDraft.isPending}
             onClick={handleCreateDraft}
           >
-            新建剧本稿
+            新建
           </Button>,
         ]}
       >
@@ -324,7 +377,10 @@ export function ScriptStage() {
             split={false}
             renderItem={(d) => (
               <List.Item
-                onClick={() => setSelectedDraftId(d.id)}
+                onClick={() => {
+                  setSelectedDraftId(d.id);
+                  setStarterOpen(false); // 点开某一稿即离开创作入口
+                }}
                 style={{
                   cursor: 'pointer',
                   borderRadius: 6,
@@ -385,7 +441,9 @@ export function ScriptStage() {
         style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}
         styles={{ body: { flex: 1, display: 'flex', flexDirection: 'column', gap: 12 } }}
         title={
-          selectedDraft ? (
+          showStarter ? (
+            '新建剧本'
+          ) : selectedDraft ? (
             <Space>
               <span>{selectedDraft.title}</span>
               {selectedDraft.isMain && <Tag color="gold">主剧本</Tag>}
@@ -396,43 +454,62 @@ export function ScriptStage() {
           )
         }
         extra={
-          <Space>
-            <Select
-              size="small"
-              style={{ width: 168 }}
-              allowClear
-              placeholder="文本模型（自动调度）"
-              value={textModelId}
-              onChange={(v) => setTextModelId(v)}
-              options={textModels.map((m) => ({
-                value: m.modelConfigId,
-                label: `${m.label}（${m.providerName}）`,
-              }))}
-            />
-            <Button
-              size="small"
-              disabled={!dirty}
-              loading={updateDraft.isPending}
-              onClick={saveContent}
-            >
-              保存
-            </Button>
-            <Button
-              size="small"
-              type="primary"
-              icon={<ThunderboltOutlined />}
-              disabled={selectedDraft === null}
-              loading={generating}
-              onClick={handleGenerate}
-            >
-              三步生成分镜
-            </Button>
-          </Space>
+          showStarter ? (
+            // 已有剧本稿时才提供返回；一稿都没有时无处可返回
+            hasDrafts ? (
+              <Button size="small" icon={<ArrowLeftOutlined />} onClick={() => setStarterOpen(false)}>
+                返回编辑器
+              </Button>
+            ) : null
+          ) : (
+            <Space>
+              <Select
+                size="small"
+                style={{ width: 168 }}
+                allowClear
+                placeholder="文本模型（自动调度）"
+                value={textModelId}
+                onChange={(v) => setTextModelId(v)}
+                options={textModels.map((m) => ({
+                  value: m.modelConfigId,
+                  label: `${m.label}（${m.providerName}）`,
+                }))}
+              />
+              <Button
+                size="small"
+                disabled={!dirty}
+                loading={updateDraft.isPending}
+                onClick={saveContent}
+              >
+                保存
+              </Button>
+              <Button
+                size="small"
+                type="primary"
+                icon={<ThunderboltOutlined />}
+                disabled={selectedDraft === null}
+                loading={generating}
+                onClick={handleGenerate}
+              >
+                三步生成分镜
+              </Button>
+            </Space>
+          )
         }
       >
         {/* 生成成功后静默判重：发现拆裂标签才显示横幅（干净时零打扰） */}
         <TagDedup projectId={projectId} showButton={false} autoCheckSignal={dedupSignal} />
-        {selectedDraft === null ? (
+        {showStarter ? (
+          <div style={{ marginTop: 40 }}>
+            <ScriptStarter
+              episodeId={episodeId}
+              textModels={textModels}
+              textModelId={textModelId}
+              onTextModelChange={setTextModelId}
+              onCreated={handleStarterCreated}
+            />
+          </div>
+        ) : selectedDraft === null ? (
           <Empty description="请先在左侧选择或新建剧本稿" style={{ marginTop: 80 }} />
         ) : (
           <>

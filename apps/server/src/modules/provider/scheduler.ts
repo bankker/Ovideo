@@ -39,7 +39,13 @@ export async function pickModelForModality(db: PrismaClient, modality: Modality)
 export function createFailoverTextGen(
   db: PrismaClient,
   fallback: (prompt: string) => Promise<string>,
+  /**
+   * jsonMode 默认 true 保持既有调用方（三步生成/对话式修改）行为不变；
+   * 剧本创作要的是散文正文，必须显式关掉，否则 response_format 会逼模型吐 JSON。
+   */
+  opts: { jsonMode?: boolean } = {},
 ): (prompt: string) => Promise<string> {
+  const jsonMode = opts.jsonMode ?? true;
   return async (prompt: string) => {
     const candidates = await pickCandidates(db, 'text');
     if (candidates.length === 0) return fallback(prompt);
@@ -49,7 +55,7 @@ export function createFailoverTextGen(
         return await chatComplete(
           { baseUrl: model.provider.baseUrl, apiKey: model.provider.apiKey, model: model.key },
           [{ role: 'user', content: prompt }],
-          { jsonMode: true },
+          { jsonMode },
         );
       } catch (err) {
         failures.push(`${model.key}: ${err instanceof Error ? err.message.slice(0, 140) : '未知错误'}`);

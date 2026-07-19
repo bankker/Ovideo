@@ -300,15 +300,28 @@ export async function applyPatch(
 }
 
 /** 预收集 patch 里全部标签输入（含 dialogue 的 speaker，按 CHARACTER 解析），一次性 findOrCreate */
+/**
+ * 旁白不是角色：它没有形象、不需要设计图、也不该驱动口型。
+ * 提示词里已要求模型把旁白写成 isNarrator，但模型并不总听话（AI 生成的剧本必然含「旁白：」行），
+ * 故在入库前硬兜底——一旦建出名为「旁白」的角色标签，后续设计/绑定/口型全会跟着错。
+ */
+const NARRATOR_NAMES = new Set(['旁白', '旁白音', '画外音', 'narrator', 'Narrator', 'NARRATOR']);
+
+export function isNarratorName(name: string): boolean {
+  return NARRATOR_NAMES.has(name.trim());
+}
+
 async function resolveAllTags(
   patch: StoryboardPatch,
   resolveTags: ResolveTagsFn,
 ): Promise<Map<string, Tag>> {
   const inputs: Array<{ name: string; type: TagType }> = [];
   const collect = (tags: Array<{ name: string; type: TagType }>, dialogue: ShotDialogueInput[]) => {
-    inputs.push(...tags);
+    inputs.push(...tags.filter((t) => !(t.type === 'CHARACTER' && isNarratorName(t.name))));
     for (const d of dialogue) {
-      if (d.speaker) inputs.push({ name: d.speaker, type: 'CHARACTER' });
+      if (d.speaker && !isNarratorName(d.speaker)) {
+        inputs.push({ name: d.speaker, type: 'CHARACTER' });
+      }
     }
   };
   for (const op of patch) {
@@ -325,6 +338,8 @@ function buildShotTagCreates(
 ): Array<{ tagId: string }> {
   const ids = new Set<string>();
   for (const t of tags) {
+    // 旁白在 resolveAllTags 已被剔除，这里同步跳过（不是解析失败）
+    if (t.type === 'CHARACTER' && isNarratorName(t.name)) continue;
     const tag = tagByName.get(t.name);
     if (!tag) throw badRequest(`标签解析失败：${t.name}`);
     ids.add(tag.id);
@@ -336,11 +351,15 @@ function buildDialogueCreates(
   dialogue: ShotDialogueInput[],
   tagByName: Map<string, Tag>,
 ): Array<{ speakerTagId: string | null; isNarrator: boolean; text: string; sortOrder: number }> {
-  return dialogue.map((d, i) => ({
-    speakerTagId: d.speaker ? (tagByName.get(d.speaker)?.id ?? null) : null,
-    // 协议约定：speaker 缺省且 isNarrator=false 时按旁白处理
-    isNarrator: d.isNarrator || !d.speaker,
-    text: d.text,
-    sortOrder: i,
-  }));
+  return dialogue.map((d, i) => {
+    // speaker 写成「旁白」的行按旁白处理，绝不挂角色标签（模型常把旁白当角色写）
+    const narrator = d.isNarrator || !d.speaker || isNarratorName(d.speaker);
+    return {
+      speakerTagId: narrator || !d.speaker ? null : (tagByName.get(d.speaker)?.id ?? null),
+      // 协议约定：speaker 缺省且 isNarrator=false 时按旁白处理
+      isNarrator: narrator,
+      text: d.text,
+      sortOrder: i,
+    };
+  });
 }

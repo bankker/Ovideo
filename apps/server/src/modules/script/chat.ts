@@ -83,6 +83,7 @@ export function buildChatPrompt(
     '{"op":"remove_shot","shotId":"镜头id"}',
     '{"op":"reorder","shotIds":["全量镜头 id 的新顺序"]}',
     'shotId / afterShotId / shotIds 必须使用上面「当前分镜」里的真实 id；未被指令触及的镜头不要输出任何操作。',
+    '旁白行必须写成 {"isNarrator":true,"text":"…"} 并省略 speaker；【严禁】把「旁白」当作角色写进 tags。',
   ].join('\n');
 }
 

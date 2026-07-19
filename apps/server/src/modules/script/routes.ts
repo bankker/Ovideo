@@ -16,6 +16,8 @@ export type EnqueueFn = (input: {
   type: JobType;
   executor: JobExecutorKind;
   inputPayload: Record<string, unknown>;
+  /** 花钱的任务据此关掉自动重试（缺省沿用 Job 表默认值，既有调用方不受影响） */
+  maxAttempts?: number;
 }) => Promise<unknown>;
 
 /**
@@ -26,6 +28,28 @@ export type ScriptChatFn = (
   db: PrismaClient,
   input: { scriptDraftId: string; baseStoryboardId: string; message: string; modelConfigId?: string },
 ) => Promise<{ patch: StoryboardPatch; summary: string }>;
+
+/** 一句话创意生成剧本的请求体 */
+const GenerateScriptBodySchema = z.object({
+  brief: z.string().min(1).max(2000),
+  /** 目标成片时长秒数：决定正文字数与场景数 */
+  durationSec: z.number().int().min(15).max(600).default(60),
+  style: z.string().max(200).optional(),
+  /** 指定文本模型；缺省走按需调度 + 失效转移 */
+  modelConfigId: z.string().optional(),
+});
+
+/** 导入剧本的体积上限：纯文本剧本再长也到不了 512KB，超了基本是传错文件 */
+const MAX_IMPORT_BYTES = 512 * 1024;
+/** 扩展名兜底：浏览器给 .md 常报 application/octet-stream，只认 mime 会误杀 */
+const TEXT_EXT = /\.(txt|md|markdown)$/i;
+const TEXT_MIME = new Set(['text/plain', 'text/markdown', 'text/x-markdown']);
+
+/** 标题取 brief 前 20 字，超长加省略号——列表里一眼能认出是哪条创意 */
+function titleFromBrief(brief: string): string {
+  const single = brief.replace(/\s+/g, ' ').trim();
+  return single.length > 20 ? `${single.slice(0, 20)}…` : single;
+}
 
 /** 对话式剧本修改请求体（v2 §4：产出 patch 预览，前端 diff 确认后另行应用） */
 const ChatBodySchema = z.object({
@@ -55,6 +79,57 @@ export const scriptRoutes: FastifyPluginAsync<ScriptRoutesOptions> = async (app,
     const body = CreateScriptDraftBodySchema.parse(req.body ?? {});
     reply.code(201);
     return createDraft(db, id, body);
+  });
+
+  /**
+   * 一句话创意 → 剧本稿（新增入口，不改动粘贴/手写那条路径）。
+   * 先落一条空内容草稿再入队：用户立刻能在左栏看到它并知道正在生成，
+   * 且任务失败时这条草稿仍在，可以手工接着写——不做"成功才落库"的全有全无。
+   */
+  app.post('/api/episodes/:id/script-drafts/generate', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const body = GenerateScriptBodySchema.parse(req.body ?? {});
+    const episode = await db.episode.findUnique({ where: { id } });
+    if (!episode) throw notFound('分集');
+
+    const draft = await createDraft(db, id, { title: titleFromBrief(body.brief), content: '' });
+    const job = await enqueue({
+      projectId: episode.projectId,
+      type: 'GENERATE_SCRIPT',
+      executor: 'API',
+      inputPayload: {
+        draftId: draft.id,
+        brief: body.brief,
+        durationSec: body.durationSec,
+        ...(body.style ? { style: body.style } : {}),
+        ...(body.modelConfigId ? { modelConfigId: body.modelConfigId } : {}),
+      },
+      // 一次调用就是一次真金白银，失败让用户自己决定要不要重试，绝不自动重刷
+      maxAttempts: 1,
+    });
+    reply.code(202);
+    return { draft, job };
+  });
+
+  /** 上传纯文本文件导入为剧本稿（第三条入口：已经写好的剧本直接进系统） */
+  app.post('/api/episodes/:id/script-drafts/import', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const episode = await db.episode.findUnique({ where: { id } });
+    if (!episode) throw notFound('分集');
+
+    const file = await req.file();
+    if (!file) throw badRequest('缺少上传文件');
+    const isText = TEXT_MIME.has(file.mimetype) || TEXT_EXT.test(file.filename ?? '');
+    if (!isText) {
+      throw badRequest('只支持 .txt / .md 纯文本文件（其他格式请先另存为纯文本）');
+    }
+    const buf = await file.toBuffer();
+    if (buf.byteLength > MAX_IMPORT_BYTES) throw badRequest('剧本文件不能超过 512KB');
+
+    const title = (file.filename ?? '导入剧本').replace(/\.[^.]+$/, '') || '导入剧本';
+    const draft = await createDraft(db, id, { title, content: buf.toString('utf-8') });
+    reply.code(201);
+    return draft;
   });
 
   app.patch('/api/script-drafts/:id', async (req) => {

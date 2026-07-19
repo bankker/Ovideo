@@ -29,6 +29,7 @@ import { enqueueJob, completeJob, failJob, updateJobProgress } from './modules/j
 import { startWorker, type JobWorker } from './modules/job/worker.js';
 import { registerExecutor, getExecutor } from './modules/job/registry.js';
 import { createStoryboardGenerator } from './modules/script/generate.js';
+import { makeGenerateScript } from './modules/script/write.js';
 import { createScriptChat } from './modules/script/chat.js';
 import { shotGroupRoutes } from './modules/shotgroup/routes.js';
 import { enhanceRoutes } from './modules/enhance/routes.js';
@@ -236,6 +237,32 @@ export function registerExecutors(): void {
     }
     return createStoryboardGenerator({ textGen })(ctx);
   });
+
+  // 一句话创意 → 剧本正文。模型路由策略与三步生成同一套，唯一区别是关掉 jsonMode：
+  // 这里要的是散文剧本，不是 JSON。
+  registerExecutor('GENERATE_SCRIPT', async (ctx) => {
+    const input = parseJson<{ modelConfigId?: string }>(ctx.job.inputJson, {});
+    let textGen = createFailoverTextGen(
+      ctx.db,
+      async () => {
+        throw new Error('未配置文本模型：请在管理后台「一键接入」任一文本厂商（豆包/千问/DeepSeek…）后重试');
+      },
+      { jsonMode: false },
+    );
+    if (input.modelConfigId) {
+      const model = await ctx.db.modelConfig.findUnique({
+        where: { id: input.modelConfigId },
+        include: { provider: true },
+      });
+      if (!model || !model.enabled || !model.provider.enabled) {
+        throw badRequest('指定的文本模型不可用（已停用或不存在）');
+      }
+      if (!model.provider.baseUrl) throw badRequest('该模型所属厂商未配置 Base URL，无法调用');
+      const cfg = { baseUrl: model.provider.baseUrl, apiKey: model.provider.apiKey, model: model.key };
+      textGen = async (prompt: string) => chatComplete(cfg, [{ role: 'user', content: prompt }]);
+    }
+    return makeGenerateScript({ textGen })(ctx);
+  });
 }
 
 export interface BuildAppOptions {
@@ -283,6 +310,7 @@ export async function buildApp(opts: BuildAppOptions = {}) {
   // 按需调度（v3.6）：任务未显式指定模型时，按 JobType 对应模态自动选用队首的已启用真实模型；
   // 无真实模型则回落 Mock。只覆盖已有真实适配器的模态（text/image），video/tts 待 M3 适配器。
   const MODALITY_BY_JOB_TYPE: Record<string, Modality> = {
+    GENERATE_SCRIPT: 'text',
     GENERATE_STORYBOARD: 'text',
     GENERATE_IMAGE: 'image',
     GENERATE_VIDEO: 'video',
@@ -294,9 +322,9 @@ export async function buildApp(opts: BuildAppOptions = {}) {
     if (!payload.modelConfigId && modality && AUTO_ROUTE_MODALITIES.includes(modality)) {
       const picked = await pickModelForModality(db, modality);
       if (picked) {
-        // 文本任务不钉死单一模型：执行时走失效转移（见 GENERATE_STORYBOARD 执行器），
+        // 文本任务不钉死单一模型：执行时走失效转移（见 GENERATE_STORYBOARD / GENERATE_SCRIPT 执行器），
         // modelKey 仅作展示；图像任务钉队首模型（图像适配器暂无转移链）
-        if (input.type === 'GENERATE_STORYBOARD') {
+        if (input.type === 'GENERATE_STORYBOARD' || input.type === 'GENERATE_SCRIPT') {
           return enqueueJob(db, {
             ...input,
             executor: 'API',

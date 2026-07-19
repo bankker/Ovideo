@@ -283,6 +283,42 @@ describe('applyPatch：复制携带产物', () => {
     expect(await tdb.db.dubbingLine.count({ where: { shotId: a1.id } })).toBe(1);
   });
 
+  it('旁白硬兜底：模型把「旁白」当角色写也不建标签，该行按旁白入库', async () => {
+    const { ep, dr } = await freshEpisode();
+    const v1 = await apply({
+      episodeId: ep.id,
+      scriptDraftId: dr.id,
+      patch: [
+        {
+          op: 'add_shot',
+          shot: makeShot('旁白镜头', {
+            // 模型不听话的两种写法：把旁白塞进 tags，且 dialogue 里 speaker 写「旁白」
+            tags: [
+              { name: '旁白', type: 'CHARACTER' },
+              { name: '小悟', type: 'CHARACTER' },
+            ],
+            dialogue: [
+              { speaker: '旁白', isNarrator: false, text: '三个月后，公司变了样。' },
+              { speaker: '小悟', isNarrator: false, text: '这也太快了吧！' },
+            ],
+          }),
+        },
+      ],
+    });
+
+    const [shot] = await loadShots(v1.storyboard.id);
+    // 只建了真实角色标签，「旁白」没有变成角色
+    expect(shot.tags.map((t) => t.tag.name)).toEqual(['小悟']);
+    expect(await tdb.db.tag.count({ where: { projectId: project.id, name: '旁白' } })).toBe(0);
+
+    // 旁白行按旁白入库（不挂说话人），真实角色行照常挂标签
+    const [narration, line] = shot.dialogue;
+    expect(narration.isNarrator).toBe(true);
+    expect(narration.speakerTagId).toBeNull();
+    expect(line.isNarrator).toBe(false);
+    expect(line.speakerTagId).not.toBeNull();
+  });
+
   it('镜头级 Binding 复制为指向新 shot 的新行，标签级绑定不动', async () => {
     const { ep, dr } = await freshEpisode();
     const base = { episodeId: ep.id, scriptDraftId: dr.id };

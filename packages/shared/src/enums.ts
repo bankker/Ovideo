@@ -25,6 +25,8 @@ export const JobExecutorKindSchema = z.enum(['LOCAL', 'API', 'GPU', 'MOCK']);
 export type JobExecutorKind = z.infer<typeof JobExecutorKindSchema>;
 
 export const JobTypeSchema = z.enum([
+  // 一句话创意 → 剧本正文；产出写回 ScriptDraft.content，与手工粘贴剧本汇入同一条路径
+  'GENERATE_SCRIPT',
   'GENERATE_STORYBOARD',
   'GENERATE_IMAGE',
   'GENERATE_VIDEO',
