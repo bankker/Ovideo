@@ -75,16 +75,20 @@ export function VideoStage() {
   const storyboards = storyboardsQuery.data;
   const [selectedStoryboardId, setSelectedStoryboardId] = useState<string | null>(null);
 
+  /** 用户手动选过旧版本 = 钉住；否则页面始终跟随最新分镜版本 */
+  const [versionPinned, setVersionPinned] = useState(false);
+
   useEffect(() => {
     if (!storyboards || storyboards.length === 0) return;
-    if (
-      selectedStoryboardId !== null &&
-      storyboards.some((s) => s.id === selectedStoryboardId)
-    )
-      return;
     const latest = storyboards.reduce((a, b) => (b.version > a.version ? b : a));
-    setSelectedStoryboardId(latest.id);
-  }, [storyboards, selectedStoryboardId]);
+    const currentExists =
+      selectedStoryboardId !== null && storyboards.some((s) => s.id === selectedStoryboardId);
+    // 未钉住时自动跟最新：改提示词产生的新版本里才有新抽的关键图，
+    // 停留在旧版本会导致"选不到最新分镜"
+    if (!currentExists || (!versionPinned && selectedStoryboardId !== latest.id)) {
+      setSelectedStoryboardId(latest.id);
+    }
+  }, [storyboards, selectedStoryboardId, versionPinned]);
 
   const storyboardQuery = useStoryboardTakes(selectedStoryboardId);
   const storyboard = storyboardQuery.data;
@@ -140,9 +144,21 @@ export function VideoStage() {
     };
   };
 
+  const latestStoryboard =
+    storyboards && storyboards.length > 0
+      ? storyboards.reduce((a, b) => (b.version > a.version ? b : a))
+      : null;
+  const onOldVersion =
+    latestStoryboard !== null &&
+    selectedStoryboardId !== null &&
+    selectedStoryboardId !== latestStoryboard.id;
+
   const versionOptions = [...(storyboards ?? [])]
     .sort((a, b) => b.version - a.version)
-    .map((s) => ({ value: s.id, label: `v${s.version}` }));
+    .map((s) => ({
+      value: s.id,
+      label: s.id === latestStoryboard?.id ? `v${s.version}（最新）` : `v${s.version}`,
+    }));
 
   return (
     <div style={{ padding: 12, height: '100%', overflowY: 'auto' }}>
@@ -153,12 +169,32 @@ export function VideoStage() {
             <Text type="secondary">分镜版本</Text>
             <Select
               size="small"
-              style={{ width: 140 }}
+              style={{ width: 156 }}
               placeholder="暂无版本"
               value={selectedStoryboardId ?? undefined}
               options={versionOptions}
-              onChange={(v) => setSelectedStoryboardId(v)}
+              onChange={(v) => {
+                setSelectedStoryboardId(v);
+                // 选到最新 = 解除钉住（继续自动跟随后续新版本）
+                setVersionPinned(v !== latestStoryboard?.id);
+              }}
             />
+            {onOldVersion && (
+              <Tooltip title="当前停留在旧分镜版本，新抽的关键图在最新版本里">
+                <Button
+                  size="small"
+                  type="link"
+                  style={{ paddingInline: 0 }}
+                  onClick={() => {
+                    if (latestStoryboard === null) return;
+                    setSelectedStoryboardId(latestStoryboard.id);
+                    setVersionPinned(false);
+                  }}
+                >
+                  回到最新
+                </Button>
+              </Tooltip>
+            )}
           </Space>
           {capabilities.length > 0 && (
             <Space size={8}>
@@ -282,7 +318,10 @@ function VideoShotCard({
   const videoTakes = takes.filter((t) => t.slot === 'VIDEO');
   const selectedVideo =
     videoTakes.find((t) => t.id === shot.videoSelectedTakeId) ?? null;
-  const keyframeTakes = takes.filter((t) => t.slot === 'KEYFRAME');
+  // 首帧候选按生成时间倒序：最新抽出的关键图排在最前，避免在一排缩略图末尾被漏看
+  const keyframeTakes = takes
+    .filter((t) => t.slot === 'KEYFRAME')
+    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
   const selectedKeyframe =
     keyframeTakes.find((t) => t.id === shot.keyframeSelectedTakeId) ?? null;
   const hasKeyframe = selectedKeyframe !== null;
@@ -446,40 +485,76 @@ function VideoShotCard({
                     trigger="click"
                     placement="rightTop"
                     title="选择首帧关键图（本镜头的抽卡版本）"
+                    // 打开即拉最新：分镜页刚抽出的关键图可能还没同步到本页缓存
+                    onOpenChange={(open) => {
+                      if (!open) return;
+                      void qc.invalidateQueries({ queryKey: ['storyboard', storyboardId] });
+                      void qc.invalidateQueries({ queryKey: ['storyboards', episodeId] });
+                    }}
                     content={
-                      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', maxWidth: 296 }}>
-                        {keyframeTakes.map((t) => {
-                          const isSel = t.id === shot.keyframeSelectedTakeId;
-                          return (
-                            <img
-                              key={t.id}
-                              src={t.asset.thumbUri ?? t.asset.uri}
-                              alt="关键图版本"
-                              title={isSel ? '当前首帧' : '点击用作首帧'}
-                              style={{
-                                width: 64,
-                                height: 64,
-                                objectFit: 'cover',
-                                borderRadius: 4,
-                                cursor: 'pointer',
-                                boxSizing: 'border-box',
-                                border: isSel ? '2px solid #faad14' : '2px solid transparent',
-                                opacity: selectTake.isPending ? 0.6 : 1,
-                              }}
-                              onClick={() => {
-                                if (isSel || selectTake.isPending) return;
-                                selectTake.mutate(
-                                  { shotId: shot.id, slot: 'KEYFRAME', takeId: t.id, storyboardId },
-                                  {
-                                    onSuccess: () =>
-                                      message.success('首帧已切换，重新生成视频将使用该关键图'),
-                                    onError: (e) => message.error(e.message),
-                                  },
-                                );
-                              }}
-                            />
-                          );
-                        })}
+                      <div style={{ maxWidth: 296 }}>
+                        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                          {keyframeTakes.map((t, i) => {
+                            const isSel = t.id === shot.keyframeSelectedTakeId;
+                            const isNewest = i === 0;
+                            return (
+                              <div key={t.id} style={{ position: 'relative', lineHeight: 0 }}>
+                                <img
+                                  src={t.asset.thumbUri ?? t.asset.uri}
+                                  alt="关键图版本"
+                                  title={isSel ? '当前首帧' : '点击用作首帧'}
+                                  style={{
+                                    width: 64,
+                                    height: 64,
+                                    objectFit: 'cover',
+                                    borderRadius: 4,
+                                    cursor: 'pointer',
+                                    boxSizing: 'border-box',
+                                    border: isSel ? '2px solid #faad14' : '2px solid transparent',
+                                    opacity: selectTake.isPending ? 0.6 : 1,
+                                  }}
+                                  onClick={() => {
+                                    if (isSel || selectTake.isPending) return;
+                                    selectTake.mutate(
+                                      {
+                                        shotId: shot.id,
+                                        slot: 'KEYFRAME',
+                                        takeId: t.id,
+                                        storyboardId,
+                                      },
+                                      {
+                                        onSuccess: () =>
+                                          message.success('首帧已切换，重新生成视频将使用该关键图'),
+                                        onError: (e) => message.error(e.message),
+                                      },
+                                    );
+                                  }}
+                                />
+                                {isNewest && (
+                                  <span
+                                    style={{
+                                      position: 'absolute',
+                                      top: 2,
+                                      left: 2,
+                                      background: '#52c41a',
+                                      color: '#fff',
+                                      fontSize: 10,
+                                      lineHeight: '14px',
+                                      padding: '0 4px',
+                                      borderRadius: 3,
+                                      pointerEvents: 'none',
+                                    }}
+                                  >
+                                    最新
+                                  </span>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                        <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 6 }}>
+                          按生成时间倒序，共 {keyframeTakes.length} 张；若刚在分镜页抽卡，重开此面板即可刷新
+                        </Text>
                       </div>
                     }
                   >
