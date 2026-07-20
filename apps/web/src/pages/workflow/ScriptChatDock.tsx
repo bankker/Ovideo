@@ -448,7 +448,12 @@ function describePatchOp(op: StoryboardPatchOp, storyboard: StoryboardDetail | u
   }
 }
 
-function ScriptChatPanel({
+/**
+ * 改分镜的对话面板。
+ * B 阶段起剧本页右栏直接挂它（改剧本那半边已由 AIDirectorPanel 接管），
+ * 故从内部组件提升为导出——ScriptChatDock 仍保留，未迁移的调用方不受影响。
+ */
+export function ScriptChatPanel({
   draftId,
   storyboardId,
   storyboard,
