@@ -63,6 +63,70 @@ export function parseScriptMentions(text: string): string[] {
   return out;
 }
 
+/* ---------- 动作行里的隐含场景 ---------- */
+
+/**
+ * 一个地点要成为"场"，用户得写一条「场景N：」抬头。但戏是会走的：
+ * 「两人走出办公室，来到天台」写在动作行里，抬头还是那一条，
+ * 于是天台既不是场景要素也不会有参考图，分镜自己临场编一个天台出来，
+ * 前后两个镜头的同一个天台还长得不一样。
+ *
+ * 【为什么用「移动动词 + 地点名词」而不是通用地名识别】
+ * 通用识别会把「他的世界」「心里」这类抽象名词全报成地点，一份会乱报的清单
+ * 用户看两次就不看了（与本文件其余检查同一条原则）。移动动词把范围收窄到
+ * "人物确实换了地方"这一种句式，宁可漏掉几处，也不制造噪音。
+ */
+const MOVE_VERBS =
+  '走进|走出|走向|走到|来到|回到|返回|进入|踏入|步入|冲进|冲出|跑到|跑进|赶到|抵达|穿过|钻进|躲进|退到|登上|下到';
+
+/** 地点后缀：必须以其中之一收尾才算地点，避免把动作宾语（「走向她」）当成地方 */
+const PLACE_NOUNS =
+  '办公室|会议室|休息室|接待室|实验室|教室|课室|宿舍|食堂|操场|走廊|楼道|楼梯间|电梯|大厅|前台|门口|天台|阳台|露台|屋顶|地下室|停车场|仓库|车间|工厂|厨房|卧室|客厅|餐厅|书房|浴室|洗手间|卫生间|院子|花园|公园|广场|街道|马路|巷子|路口|医院|病房|诊室|手术室|药房|车站|机场|码头|港口|车厢|车里|店里|商店|超市|咖啡馆|酒吧|饭店|酒店|房间|屋子|山顶|山脚|海边|河边|湖边|桥上|田里|村口|城墙|大殿|书院';
+
+const IMPLIED_SCENE_RE = new RegExp(
+  `(?:${MOVE_VERBS})([^\\s，。；、,;.!？?！:：（）()【】\\[\\]"'\`]{0,8}?(?:${PLACE_NOUNS}))`,
+  'g',
+);
+
+export interface ImpliedScene {
+  /** 地点名（含限定词，如「顶楼天台」） */
+  name: string;
+  /** 首次出现在第几场（0-based） */
+  sceneIndex: number;
+  /** 触发这条判定的原文行，供用户核对——不给证据的提醒等于要用户凭空相信 */
+  evidence: string;
+}
+
+/**
+ * 找出动作行里出现、但没有任何一条场景抬头覆盖的地点。
+ * knownPlaces 传"已经算作场景的名字"，命中即跳过：抬头已经写了的地方不是新场景。
+ */
+export function detectImpliedScenes(
+  parsed: ParsedScript,
+  knownPlaces: ReadonlySet<string>,
+): ImpliedScene[] {
+  const out: ImpliedScene[] = [];
+  const seen = new Set<string>();
+
+  /** 抬头里已有的地点，逐个做包含判断：抬头写「客户会议室」时，动作行里的「会议室」不算新地方 */
+  const known = [...knownPlaces].filter((p) => p !== '');
+
+  for (const scene of parsed.scenes) {
+    for (const line of scene.lines) {
+      if (line.kind !== 'action') continue;
+      for (const m of line.raw.matchAll(IMPLIED_SCENE_RE)) {
+        const name = m[1].trim();
+        if (name === '' || seen.has(name)) continue;
+        // 与已知地点互为子串就当成同一个地方（「天台」vs「顶楼天台」）
+        if (known.some((p) => p.includes(name) || name.includes(p))) continue;
+        seen.add(name);
+        out.push({ name, sceneIndex: scene.index, evidence: line.raw.trim() });
+      }
+    }
+  }
+  return out;
+}
+
 /** 累加器：同名要素只保留一条，场景下标合并 */
 interface Draft {
   type: ScriptElementType;

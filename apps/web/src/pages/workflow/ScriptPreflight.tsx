@@ -11,7 +11,11 @@ import { Link } from 'react-router-dom';
 import { useProjectTags } from '../../api/design-hooks';
 // 时长展示口径复用解析器导出的那一份，免得体检弹窗和工具栏显示不一致
 import { formatDuration, type ParsedScene, type ParsedScript } from '../../utils/script-parse';
-import { collectScriptElements, type ScriptElements } from '../../utils/script-elements';
+import {
+  collectScriptElements,
+  detectImpliedScenes,
+  type ScriptElements,
+} from '../../utils/script-elements';
 
 const { Text } = Typography;
 
@@ -190,6 +194,21 @@ export function usePreflight(projectId: string, parsed: ParsedScript): Preflight
     [parsed.scenes],
   );
 
+  /**
+   * 动作行里换了地方却没有场景抬头的那些地点。
+   * 已知地点 = 抬头给出的地点 + 已归集的场景要素（含已建场景标签），
+   * 两者都算"这地方已经在规划里了"，只有都不沾边的才值得提醒。
+   */
+  const impliedScenes = useMemo(() => {
+    const known = new Set<string>();
+    for (const s of parsed.scenes) {
+      if (s.location !== '') known.add(s.location);
+      if (s.title !== '') known.add(s.title);
+    }
+    for (const e of elements.scenes) known.add(e.name);
+    return detectImpliedScenes(parsed, known);
+  }, [parsed, elements.scenes]);
+
   const issues = useMemo((): PreflightIssue[] => {
     const list: PreflightIssue[] = [];
 
@@ -277,6 +296,20 @@ export function usePreflight(projectId: string, parsed: ParsedScript): Preflight
           placeNoRef.map((e) => e.name),
         )}。标签建好了但没定过图，生成时只能靠文字描述还原，前后镜头的同一地点容易对不上。`,
         action: 'design',
+      });
+    }
+
+    // 3e) 动作行里换了地方，但没有对应的场景抬头（本阶段新增）
+    if (impliedScenes.length > 0) {
+      list.push({
+        key: 'implied-scene',
+        severity: 'warning',
+        title: `${impliedScenes.length} 处动作行里出现了新的地点`,
+        detail: `${impliedScenes
+          .map((s) => `${sceneRef(parsed.scenes[s.sceneIndex])}的「${s.name}」（${s.evidence}）`)
+          .join(
+            '；',
+          )}。这些地方没有自己的场景抬头，分镜只会按当前场的地点取景，换过去的那几个镜头由模型临场编。要么给它补一条「场景N：${impliedScenes[0].name}，……」抬头，要么确认这只是一句过场描写。`,
       });
     }
 
@@ -371,7 +404,7 @@ export function usePreflight(projectId: string, parsed: ParsedScript): Preflight
     }
 
     return list.sort((a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity]);
-  }, [parsed.scenes, scriptCharacters, characterTags, elements, annotatableNames]);
+  }, [parsed, scriptCharacters, characterTags, elements, annotatableNames, impliedScenes]);
 
   return {
     issues,
@@ -393,10 +426,18 @@ export function usePreflight(projectId: string, parsed: ParsedScript): Preflight
 export function ScriptPreflightContent({
   result,
   designHref,
+  annotatableCount = 0,
+  onAnnotate,
+  annotating = false,
 }: {
   result: PreflightResult;
   /** 「去设计页」的目标路由；由向导按当前项目/分集拼好后传进来 */
   designHref: string;
+  /** 就地标注能新增多少个 @；由向导算好传入，与工具栏用的是同一个纯函数 */
+  annotatableCount?: number;
+  /** 有它才把「未标注」那条做成能按的按钮；缺省时退回纯文字提示 */
+  onAnnotate?: () => void;
+  annotating?: boolean;
 }) {
   const { token } = theme.useToken();
   const { issues, errorCount, elements, stats } = result;
@@ -495,9 +536,21 @@ export function ScriptPreflightContent({
                     )}
                     {i.action === 'annotate' && (
                       <div style={{ marginTop: 4 }}>
-                        <Text type="secondary" style={{ fontSize: 12 }}>
-                          标注入口在剧本工具栏的「标注要素」。
-                        </Text>
+                        {onAnnotate && annotatableCount > 0 ? (
+                          <Button
+                            type="link"
+                            size="small"
+                            style={{ paddingInline: 0 }}
+                            loading={annotating}
+                            onClick={onAnnotate}
+                          >
+                            就地标注这 {annotatableCount} 处（可撤销）
+                          </Button>
+                        ) : (
+                          <Text type="secondary" style={{ fontSize: 12 }}>
+                            标注入口在剧本工具栏的「标注要素」。
+                          </Text>
+                        )}
                       </div>
                     )}
                   </div>

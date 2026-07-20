@@ -5,7 +5,7 @@
 // 这三步把三件本该在开拍前定下来的事摆到台面上：剧本有没有硬伤、这一集要什么拆镜风格、
 // 视觉素材齐不齐。前两步产出一段导演说明随请求下发，第三步只做确认与补救。
 
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Alert,
   Button,
@@ -31,6 +31,7 @@ import { useProject, useUpdateProject, type Project, type UpdateProjectInput } f
 import { useTagDesigns, useProjectTags } from '../../api/design-hooks';
 import { formatDuration, type ParsedScript } from '../../utils/script-parse';
 import type { ScriptElement } from '../../utils/script-elements';
+import { annotateMentions } from '../../utils/annotate-mentions';
 import {
   averageShotSec,
   buildDirective,
@@ -69,6 +70,11 @@ export interface StoryboardPlanningWizardProps {
   onCancel: () => void;
   /** 用户确认后发起生成；directive 是第二步参数拼成的中文导演说明 */
   onGenerate: (directive: string) => void;
+  /** 剧本正文原文：标注要在向导里就地做，需要它作为改写的基底 */
+  fullText: string;
+  /** 就地标注：把算好的新正文交给页面落库（与工具栏「标注要素」同一条落库路径） */
+  onAnnotate: (nextText: string) => void;
+  annotating: boolean;
 }
 
 export function StoryboardPlanningWizard({
@@ -81,11 +87,25 @@ export function StoryboardPlanningWizard({
   failure,
   onCancel,
   onGenerate,
+  fullText,
+  onAnnotate,
+  annotating,
 }: StoryboardPlanningWizardProps) {
   const result = usePreflight(projectId, parsed);
   const { errorCount, elements } = result;
 
   const designHref = `/projects/${projectId}/episodes/${episodeId}/design`;
+
+  /**
+   * 就地标注。体检里报「N 个要素还没标注 @」，此前只写一句"入口在剧本工具栏"——
+   * 用户得关掉向导、找到工具栏、点完再重新走一遍体检，于是这条提醒基本没人处理。
+   * 标注结果与工具栏用同一个纯函数算，落库也走同一个回调，两处不会各标各的。
+   */
+  const annotation = useMemo(() => annotateMentions(fullText, elements), [fullText, elements]);
+  const handleAnnotateHere = useCallback(() => {
+    if (annotation.added === 0) return;
+    onAnnotate(annotation.text);
+  }, [annotation, onAnnotate]);
 
   const [step, setStep] = useState(0);
 
@@ -257,7 +277,15 @@ export function StoryboardPlanningWizard({
         />
       )}
 
-      {step === 0 && <ScriptPreflightContent result={result} designHref={designHref} />}
+      {step === 0 && (
+        <ScriptPreflightContent
+          result={result}
+          designHref={designHref}
+          annotatableCount={annotation.added}
+          onAnnotate={handleAnnotateHere}
+          annotating={annotating}
+        />
+      )}
 
       {step === 1 && (
         <DirectorPlanStep

@@ -700,6 +700,9 @@ export function ScriptStage() {
         failure={generateFailure?.detail ?? null}
         onCancel={() => setPreflightMode(null)}
         onGenerate={handleConfirmPlan}
+        fullText={content}
+        onAnnotate={handleAnnotate}
+        annotating={updateDraft.isPending}
       />
 
       {/* 重命名弹窗 */}

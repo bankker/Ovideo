@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { TagEntity } from '../api/design-hooks';
-import { collectScriptElements, parseScriptMentions } from './script-elements';
+import { collectScriptElements, detectImpliedScenes, parseScriptMentions } from './script-elements';
 import { parseScript } from './script-parse';
 
 /** 造一条项目标签；测试只关心 type/name/canonicalAssetId，其余字段给占位值 */
@@ -147,5 +147,48 @@ describe('collectScriptElements — @ 提及', () => {
     const { props, characters } = collectScriptElements(mentioned, []);
     expect(characters.map((c) => c.name)).toEqual(['小美']);
     expect(props.map((p) => p.name)).toEqual([]);
+  });
+});
+
+describe('detectImpliedScenes', () => {
+  /** 抬头只有一条，戏却走到了别处 */
+  const MOVING = parseScript(
+    [
+      '场景一：办公室，白天。',
+      '小美收拾东西，走出办公室，来到顶楼天台。',
+      '小美：终于结束了。',
+    ].join('\n'),
+  );
+
+  it('报出动作行里换到的新地点，并带上原文作为证据', () => {
+    const found = detectImpliedScenes(MOVING, new Set(['办公室']));
+    expect(found.map((s) => s.name)).toEqual(['顶楼天台']);
+    expect(found[0].sceneIndex).toBe(0);
+    expect(found[0].evidence).toContain('顶楼天台');
+  });
+
+  it('抬头已经写过的地点不再报——那不是新场景', () => {
+    expect(detectImpliedScenes(MOVING, new Set(['办公室', '天台']))).toEqual([]);
+  });
+
+  it('同一个地点出现多次只报一条', () => {
+    const twice = parseScript(
+      ['场景一：办公室，白天。', '他走进会议室。', '她也走进会议室。'].join('\n'),
+    );
+    expect(detectImpliedScenes(twice, new Set(['办公室'])).map((s) => s.name)).toEqual(['会议室']);
+  });
+
+  it('移动动词后面不是地点名词时不报——宁可漏掉也不制造噪音', () => {
+    const noise = parseScript(
+      ['场景一：办公室，白天。', '他走向她，回到从前的样子。'].join('\n'),
+    );
+    expect(detectImpliedScenes(noise, new Set(['办公室']))).toEqual([]);
+  });
+
+  it('只看动作行，台词里的地点不算——那是人物在说话，不是戏真的走过去了', () => {
+    const inDialogue = parseScript(
+      ['场景一：办公室，白天。', '小美：我们走进会议室再谈吧。'].join('\n'),
+    );
+    expect(detectImpliedScenes(inDialogue, new Set(['办公室']))).toEqual([]);
   });
 });
