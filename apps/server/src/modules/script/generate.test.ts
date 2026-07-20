@@ -70,6 +70,28 @@ describe('buildStoryboardPrompt', () => {
     expect(prompt).toContain('"isNarrator":true');
     expect(buildStoryboardPrompt(SCRIPT, [], '水墨风')).toContain('全剧统一为「水墨风」');
   });
+
+  it('不传导演要求时提示词与从前逐字一致（向后兼容）', () => {
+    expect(prompt).not.toContain('【导演要求');
+    expect(buildStoryboardPrompt(SCRIPT, [], '', '')).toBe(prompt);
+    // 只有空白的导演要求同样不该长出一个空段落
+    expect(buildStoryboardPrompt(SCRIPT, [], '', '   \n  ')).toBe(prompt);
+  });
+
+  it('传了导演要求时整段插在通用规则之前，并写明冲突时以硬性约束为准', () => {
+    const directive = '拆镜风格：商业快剪。目标总时长约 45 秒，建议 15 个镜头。';
+    const withDirective = buildStoryboardPrompt(SCRIPT, [], '', directive);
+    expect(withDirective).toContain('【导演要求');
+    expect(withDirective).toContain(directive);
+    expect(withDirective).toContain('与下面的硬性约束冲突时以硬性约束为准');
+    // 位置：导演要求必须排在场景/镜头规则之前，模型才会带着它去读后面的规则
+    expect(withDirective.indexOf('【导演要求')).toBeLessThan(
+      withDirective.indexOf('【第一级：场景】'),
+    );
+    // 原有规则一条不少
+    expect(withDirective).toContain('2-5 个镜头');
+    expect(withDirective).toContain('"isNarrator":true');
+  });
 });
 
 describe('flattenGeneratedStoryboard', () => {
@@ -319,6 +341,34 @@ describe('createStoryboardGenerator', () => {
     ).toBe(1);
 
     expect(updateProgress).toHaveBeenCalled();
+  });
+
+  it('Job 输入里的 directive 会进入提示词；不带时提示词里没有导演要求段', async () => {
+    const ep = await tdb.db.episode.create({ data: { projectId: project.id, title: '导演要求集' } });
+    const draft = await tdb.db.scriptDraft.create({ data: { episodeId: ep.id, content: SCRIPT } });
+    const directive = '拆镜风格：动漫戏剧。目标总时长约 60 秒，建议 20 个镜头。';
+
+    const seen: string[] = [];
+    const textGen = async (prompt: string) => {
+      seen.push(prompt);
+      return mockTextGen(prompt);
+    };
+    const generator = createStoryboardGenerator({ textGen });
+
+    await generator({
+      db: tdb.db,
+      job: { inputJson: toJson({ scriptDraftId: draft.id, directive }) },
+      updateProgress: async () => {},
+    });
+    expect(seen[0]).toContain('【导演要求');
+    expect(seen[0]).toContain(directive);
+
+    await generator({
+      db: tdb.db,
+      job: { inputJson: toJson({ scriptDraftId: draft.id }) },
+      updateProgress: async () => {},
+    });
+    expect(seen[1]).not.toContain('【导演要求');
   });
 
   it('首次输出非法 JSON 时重试一次成功（含 ```json 围栏剥离）', async () => {

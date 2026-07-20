@@ -19,6 +19,8 @@ export const UpdateProjectBodySchema = z.object({
   description: z.string().max(2000).optional(),
   /** 项目级画风设定，生成提示词自动携带（全剧风格一致） */
   stylePrompt: z.string().max(500).optional(),
+  /** 项目画幅：分镜关键图与成片画布的唯一真相 */
+  aspectRatio: z.enum(["9:16", "16:9", "1:1", "3:4", "4:3"]).optional(),
   archived: z.boolean().optional(),
 });
 export const CreateEpisodeBodySchema = z.object({
@@ -54,6 +56,11 @@ export const UpdateScriptDraftBodySchema = z.object({
 export const GenerateStoryboardBodySchema = z.object({
   /** 指定文本模型；缺省时服务端选第一个 enabled 的 TEXT 模型，无则用 MOCK */
   modelConfigId: z.string().optional(),
+  /**
+   * 导演要求：分镜规划向导拼出来的一段中文说明（拆镜风格、目标时长、节奏、运镜等），
+   * 原样插进拆镜提示词。缺省时提示词与从前逐字一致。
+   */
+  directive: z.string().max(1000).optional(),
 });
 export const ApplyPatchBodySchema = z.object({
   patch: StoryboardPatchSchema,

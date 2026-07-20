@@ -1,27 +1,19 @@
+// 剧本体检：分镜规划向导的第一步内容。
+//
+// 【为什么从弹窗降级成内容组件】体检以前是独立弹窗，现在它是三步向导的第一步。
+// 把 Modal 外壳留在 StoryboardPlanningWizard 里，这里只负责"这份剧本有什么问题"，
+// 于是同一份检查既能出现在只读体检里，也能出现在规划流程里，判定逻辑只有一份。
+
 import { useMemo } from 'react';
-import { Alert, Button, Empty, Modal, Popconfirm, Space, Tag, Typography, theme } from 'antd';
+import { Alert, Button, Empty, Space, Tag, Typography, theme } from 'antd';
 import { CheckCircleOutlined } from '@ant-design/icons';
+import { Link } from 'react-router-dom';
 import { useProjectTags } from '../../api/design-hooks';
 // 时长展示口径复用解析器导出的那一份，免得体检弹窗和工具栏显示不一致
 import { formatDuration, type ParsedScene, type ParsedScript } from '../../utils/script-parse';
+import { collectScriptElements, type ScriptElements } from '../../utils/script-elements';
 
 const { Text } = Typography;
-
-export interface ScriptPreflightProps {
-  open: boolean;
-  /** 取项目标签（人物 / 场景 / 道具）用 */
-  projectId: string;
-  /** 解析结果；统计与检查全部基于它，不在这里重新解析正文 */
-  parsed: ParsedScript;
-  onCancel: () => void;
-  /** 用户决定继续：由页面去发起分镜规划 */
-  onConfirm: () => void;
-  /**
-   * 'plan'（默认）＝ 从「开始分镜规划」进来，底部给「继续分镜规划」；
-   * 'check' ＝ 从「剧本体检」进来，只读，不提供继续。
-   */
-  mode?: 'check' | 'plan';
-}
 
 /** ---------- 判定口径 ---------- */
 
@@ -34,14 +26,24 @@ const MAX_SHOTS_PER_SCENE = 5;
 
 type Severity = 'error' | 'warning' | 'info';
 
-interface PreflightIssue {
+export interface PreflightIssue {
   key: string;
   severity: Severity;
   title: string;
   detail: string;
+  /** 'design' = 附一个"去设计页"的链接；'annotate' = 提示去工具栏做 @ 标注 */
+  action?: 'design' | 'annotate';
 }
 
 const SEVERITY_ORDER: Record<Severity, number> = { error: 0, warning: 1, info: 2 };
+
+/** 清单里最多点名几个要素，超出用「等 N 个」收尾——一屏放不下 30 个名字 */
+const MAX_NAMED = 6;
+
+function nameList(names: string[]): string {
+  if (names.length <= MAX_NAMED) return names.join('、');
+  return `${names.slice(0, MAX_NAMED).join('、')} 等 ${names.length} 个`;
+}
 
 /**
  * 该场的纯对白时长（不含动作行），用于判断"对白把这一场撑爆了"。
@@ -122,21 +124,49 @@ function findNameMixups(names: string[]): string[][] {
   return groups;
 }
 
-/** ---------- 组件 ---------- */
+/** ---------- 体检结果（向导要用 errorCount 决定"下一步"还是"仍要继续"） ---------- */
 
-export function ScriptPreflight({
-  open,
-  projectId,
-  parsed,
-  onCancel,
-  onConfirm,
-  mode = 'plan',
-}: ScriptPreflightProps) {
-  const { token } = theme.useToken();
+export interface PreflightResult {
+  issues: PreflightIssue[];
+  errorCount: number;
+  /** 要素归集结果：第二、三步也要读它，所以由体检这一层统一算出来往下传 */
+  elements: ScriptElements;
+  /** 统计卡片用的派生数据 */
+  stats: {
+    sceneCount: number;
+    dialogueMsTotal: number;
+    totalDurationMs: number;
+    totalShotCount: number;
+    scriptCharacters: string[];
+    characterTagCount: number;
+  };
+}
+
+/**
+ * 体检的全部计算。做成 hook 是因为向导的三步都要读同一份结果：
+ * 第一步展示问题、第二步据总时长给默认值、第三步逐个要素确认。
+ * 各步各算一遍必然会出现"第一步说缺 3 张图、第三步只列出 2 张"。
+ */
+export function usePreflight(projectId: string, parsed: ParsedScript): PreflightResult {
   const tagsQuery = useProjectTags(projectId);
   const tags = useMemo(() => tagsQuery.data ?? [], [tagsQuery.data]);
 
-  const fullText = useMemo(() => parsed.scenes.map((s) => s.text).join('\n'), [parsed.scenes]);
+  const elements = useMemo(() => collectScriptElements(parsed, tags), [parsed, tags]);
+
+  /**
+   * 「标注要素」够得着的要素名：只有出现在动作/环境行里的才算。
+   * 场景名通常只写在「场景N：」抬头里，而标注器按硬规则绝不碰抬头行与台词——
+   * 若把它们也报成"未标注"，用户照提示去点按钮却是灰的（那时确实没什么可标了），
+   * 两条文案互相打脸且这条提醒永远消不掉。
+   */
+  const annotatableNames = useMemo(() => {
+    const actionText = parsed.scenes
+      .flatMap((s) => s.lines)
+      .filter((l) => l.kind === 'action')
+      .map((l) => l.raw)
+      .join('\n');
+    return (name: string) => actionText.includes(name);
+  }, [parsed]);
 
   /** 剧本里出现过的角色（去重保序，不含旁白——解析器已剔除） */
   const scriptCharacters = useMemo(() => {
@@ -154,29 +184,14 @@ export function ScriptPreflight({
   }, [parsed.scenes]);
 
   const characterTags = useMemo(() => tags.filter((t) => t.type === 'CHARACTER'), [tags]);
-  const sceneTags = useMemo(() => tags.filter((t) => t.type === 'SCENE'), [tags]);
-
-  /** 剧本正文里出现过的道具标签；朴素 includes，与场景检查器同一口径 */
-  const propTagsInScript = useMemo(
-    () => tags.filter((t) => t.type === 'PROP' && t.name !== '' && fullText.includes(t.name)),
-    [tags, fullText],
-  );
-
-  /** 已识别场景：解析出标题的场景（无标题的散文块不算） */
-  const namedScenes = useMemo(
-    () => parsed.scenes.filter((s) => hasHeading(s) && s.title !== ''),
-    [parsed.scenes],
-  );
 
   const dialogueMsTotal = useMemo(
     () => parsed.scenes.reduce((sum, s) => sum + dialogueMsOf(s), 0),
     [parsed.scenes],
   );
 
-  /** ---------- 问题清单 ---------- */
   const issues = useMemo((): PreflightIssue[] => {
     const list: PreflightIssue[] = [];
-    const tagNames = new Set(characterTags.map((t) => t.name));
 
     // 1) 对白已经撑满甚至超过这一场的预算：镜头时长会被挤爆（严重）
     for (const s of parsed.scenes) {
@@ -194,30 +209,74 @@ export function ScriptPreflight({
     }
 
     // 2) 剧本用到的角色没有参考图：形象会在每个镜头里漂（严重）
-    const noRef = characterTags.filter(
-      (t) => scriptCharacters.includes(t.name) && t.canonicalAssetId === null,
-    );
-    if (noRef.length > 0) {
+    const charNoRef = elements.characters.filter((e) => e.tagId !== null && !e.hasReference);
+    if (charNoRef.length > 0) {
       list.push({
         key: 'character-no-reference',
         severity: 'error',
-        title: `${noRef.length} 个角色还没有参考图`,
-        detail: `${noRef
-          .map((t) => t.name)
-          .join('、')}。没有默认参考图，每个镜头都会各画各的，同一个人前后长得不一样。先去「设计」阶段给他们定一张形象图。`,
+        title: `${charNoRef.length} 个角色还没有参考图`,
+        detail: `${nameList(
+          charNoRef.map((e) => e.name),
+        )}。没有默认参考图，每个镜头都会各画各的，同一个人前后长得不一样。先去「设计」阶段给他们定一张形象图。`,
+        action: 'design',
       });
     }
 
     // 3) 剧本里有、项目标签里没有：三步生成会补建，属提醒
-    const missingTags = scriptCharacters.filter((n) => !tagNames.has(n));
-    if (missingTags.length > 0) {
+    const newChars = elements.newElements.characters;
+    if (newChars.length > 0) {
       list.push({
         key: 'character-missing-tag',
         severity: 'warning',
-        title: `${missingTags.length} 个角色还没有建标签`,
-        detail: `${missingTags.join(
-          '、',
+        title: `${newChars.length} 个角色还没有建标签`,
+        detail: `${nameList(
+          newChars.map((e) => e.name),
         )}。开始分镜规划时会自动创建这些角色标签，但它们一开始没有形象图，需要你随后去「设计」阶段补上。`,
+        action: 'design',
+      });
+    }
+
+    // 3b) 即将新建的场景（本阶段新增）：同一地点在不同镜头里会各画各的
+    const newScenes = elements.newElements.scenes;
+    if (newScenes.length > 0) {
+      list.push({
+        key: 'scene-will-be-created',
+        severity: 'warning',
+        title: `将新建 ${newScenes.length} 个场景标签`,
+        detail: `${nameList(
+          newScenes.map((e) => e.name),
+        )}。它们还没有参考图，同一地点在不同镜头里可能长得不一样。建议先去「设计」阶段为主要场景生成参考图，再回来规划分镜。`,
+        action: 'design',
+      });
+    }
+
+    // 3c) 即将新建的道具（本阶段新增）：道具比场景宽容，降一级
+    const newProps = elements.newElements.props;
+    if (newProps.length > 0) {
+      list.push({
+        key: 'prop-will-be-created',
+        severity: 'info',
+        title: `将新建 ${newProps.length} 个道具标签`,
+        detail: `${nameList(
+          newProps.map((e) => e.name),
+        )}。道具没有参考图时由模型自由发挥，关键道具（反复出镜、承担剧情的那几件）建议先在「设计」阶段定稿。`,
+        action: 'design',
+      });
+    }
+
+    // 3d) 已建标签但缺参考图的场景与道具（本阶段新增）：角色那条已在 #2 单列，这里不重复
+    const placeNoRef = [...elements.scenes, ...elements.props].filter(
+      (e) => e.tagId !== null && !e.hasReference,
+    );
+    if (placeNoRef.length > 0) {
+      list.push({
+        key: 'place-prop-no-reference',
+        severity: 'warning',
+        title: `${placeNoRef.length} 个场景或道具标签还没有参考图`,
+        detail: `${nameList(
+          placeNoRef.map((e) => e.name),
+        )}。标签建好了但没定过图，生成时只能靠文字描述还原，前后镜头的同一地点容易对不上。`,
+        action: 'design',
       });
     }
 
@@ -253,7 +312,7 @@ export function ScriptPreflight({
           .join(
             '、',
           )}。一场戏最多拆 ${MAX_SHOTS_PER_SCENE} 个镜头，动作超过 ${MAX_ACTION_LINES} 行通常意味着它其实是好几场戏，建议按地点或时间切开。`,
-      });
+        });
     }
 
     // 6) 角色名疑似混用
@@ -278,9 +337,9 @@ export function ScriptPreflight({
         key: 'tag-not-in-script',
         severity: 'info',
         title: `${unusedTags.length} 个角色标签在本篇里没出现`,
-        detail: `${unusedTags
-          .map((t) => t.name)
-          .join('、')}。可能是别的分集用的，或者上一版剧本留下的，不影响这次分镜。`,
+        detail: `${nameList(
+          unusedTags.map((t) => t.name),
+        )}。可能是别的分集用的，或者上一版剧本留下的，不影响这次分镜。`,
       });
     }
 
@@ -296,46 +355,60 @@ export function ScriptPreflight({
       });
     }
 
+    // 9) 未标注 @ 的要素（本阶段新增）：标注是"这一场用哪几张参考图"的唯一抓手。
+    //    只报「标注要素」真的能处理的那些，否则这条提醒永远消不掉。
+    const annotatable = elements.unannotated.filter((e) => annotatableNames(e.name));
+    if (annotatable.length > 0) {
+      list.push({
+        key: 'not-annotated',
+        severity: 'info',
+        title: `${annotatable.length} 个要素还没有在正文里标注 @`,
+        detail: `${nameList(
+          annotatable.map((e) => e.name),
+        )}。不标注也能生成，但要素由模型临场推断；标注后可精确控制每一场用哪些参考图（@角色 与 @道具 会带上参考图，@场景 只锚定文字，@!场景 强制带图）。`,
+        action: 'annotate',
+      });
+    }
+
     return list.sort((a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity]);
-  }, [parsed.scenes, scriptCharacters, characterTags]);
+  }, [parsed.scenes, scriptCharacters, characterTags, elements, annotatableNames]);
 
-  const errorCount = issues.filter((i) => i.severity === 'error').length;
-  const hasSevere = errorCount > 0;
+  return {
+    issues,
+    errorCount: issues.filter((i) => i.severity === 'error').length,
+    elements,
+    stats: {
+      sceneCount: parsed.scenes.length,
+      dialogueMsTotal,
+      totalDurationMs: parsed.totalDurationMs,
+      totalShotCount: parsed.totalShotCount,
+      scriptCharacters,
+      characterTagCount: characterTags.length,
+    },
+  };
+}
 
-  // 「剧本体检」按钮进来的是只读体检：用户此刻想知道的是"我的剧本有什么问题"，
-  // 在这条路径上摆一个「继续分镜规划」等于把两个意图混成一个按钮
-  const continueButton = mode === 'check' ? null : hasSevere ? (
-    // 有严重问题不拦死（用户可能有意为之），但要让他多按一下、知道自己在跳过什么
-    <Popconfirm
-      title="确定跳过这些问题？"
-      description={`还有 ${errorCount} 个严重问题没处理，分镜结果可能需要返工。`}
-      okText="仍要继续"
-      cancelText="回去修改"
-      onConfirm={onConfirm}
-    >
-      <Button type="primary" danger>
-        仍要继续
-      </Button>
-    </Popconfirm>
-  ) : (
-    <Button type="primary" onClick={onConfirm}>
-      继续分镜规划
-    </Button>
-  );
+/** ---------- 第一步内容 ---------- */
+
+export function ScriptPreflightContent({
+  result,
+  designHref,
+}: {
+  result: PreflightResult;
+  /** 「去设计页」的目标路由；由向导按当前项目/分集拼好后传进来 */
+  designHref: string;
+}) {
+  const { token } = theme.useToken();
+  const { issues, errorCount, elements, stats } = result;
+
+  /** 「已有标签 N · 将新建 M」：把一个数字拆成两个，用户才知道哪些是要补的 */
+  const tagSplit = (list: { tagId: string | null }[]) => {
+    const existing = list.filter((e) => e.tagId !== null).length;
+    return `已有标签 ${existing} · 将新建 ${list.length - existing}`;
+  };
 
   return (
-    <Modal
-      open={open}
-      onCancel={onCancel}
-      title="剧本体检"
-      width={720}
-      footer={
-        <Space>
-          <Button onClick={onCancel}>{mode === 'check' ? '关闭' : '取消'}</Button>
-          {continueButton}
-        </Space>
-      }
-    >
+    <>
       {/* ---------- 统计 ---------- */}
       <div
         style={{
@@ -345,31 +418,29 @@ export function ScriptPreflight({
           marginBottom: 16,
         }}
       >
-        <StatCard label="场景数量" value={`${parsed.scenes.length} 场`} />
-        <StatCard label="预计对白时长" value={formatDuration(dialogueMsTotal)} />
-        <StatCard label="预计总时长" value={formatDuration(parsed.totalDurationMs)} />
-        <StatCard label="建议镜头数量" value={`${parsed.totalShotCount} 个`} />
+        <StatCard label="场景数量" value={`${stats.sceneCount} 场`} />
+        <StatCard label="预计对白时长" value={formatDuration(stats.dialogueMsTotal)} />
+        <StatCard label="预计总时长" value={formatDuration(stats.totalDurationMs)} />
+        <StatCard label="建议镜头数量" value={`${stats.totalShotCount} 个`} />
         <StatCard
           label="已识别人物"
-          value={`${scriptCharacters.length} 个`}
+          value={`${stats.scriptCharacters.length} 个`}
           hint={
-            scriptCharacters.length === 0
+            stats.scriptCharacters.length === 0
               ? '剧本里没有对白'
-              : `项目标签 ${characterTags.length} 个`
+              : tagSplit(elements.characters)
           }
         />
         <StatCard
           label="已识别场景"
-          value={`${namedScenes.length} 个`}
-          hint={`项目标签 ${sceneTags.length} 个`}
+          value={`${elements.scenes.length} 个`}
+          hint={tagSplit(elements.scenes)}
         />
         <StatCard
           label="已识别道具"
-          value={`${propTagsInScript.length} 个`}
+          value={`${elements.props.length} 个`}
           hint={
-            propTagsInScript.length === 0
-              ? '正文里没提到已建标签的道具'
-              : propTagsInScript.map((t) => t.name).join('、')
+            elements.props.length === 0 ? '正文里没识别到道具' : tagSplit(elements.props)
           }
         />
       </div>
@@ -403,20 +474,40 @@ export function ScriptPreflight({
             {issues.map((i) => (
               <Alert
                 key={i.key}
-                type={i.severity === 'error' ? 'error' : i.severity === 'warning' ? 'warning' : 'info'}
+                type={
+                  i.severity === 'error' ? 'error' : i.severity === 'warning' ? 'warning' : 'info'
+                }
                 showIcon
                 message={<Text style={{ fontSize: 13 }}>{i.title}</Text>}
                 description={
-                  <Text type="secondary" style={{ fontSize: 12, lineHeight: 1.8 }}>
-                    {i.detail}
-                  </Text>
+                  <div>
+                    <Text type="secondary" style={{ fontSize: 12, lineHeight: 1.8 }}>
+                      {i.detail}
+                    </Text>
+                    {i.action === 'design' && (
+                      <div style={{ marginTop: 4 }}>
+                        <Link to={designHref}>
+                          <Button type="link" size="small" style={{ paddingInline: 0 }}>
+                            去设计页补参考图
+                          </Button>
+                        </Link>
+                      </div>
+                    )}
+                    {i.action === 'annotate' && (
+                      <div style={{ marginTop: 4 }}>
+                        <Text type="secondary" style={{ fontSize: 12 }}>
+                          标注入口在剧本工具栏的「标注要素」。
+                        </Text>
+                      </div>
+                    )}
+                  </div>
                 }
               />
             ))}
           </Space>
         )}
       </div>
-    </Modal>
+    </>
   );
 }
 

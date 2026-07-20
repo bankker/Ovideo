@@ -181,6 +181,8 @@ export const scriptRoutes: FastifyPluginAsync<ScriptRoutesOptions> = async (app,
       inputPayload: {
         scriptDraftId: draft.id,
         ...(body.modelConfigId ? { modelConfigId: body.modelConfigId } : {}),
+        // 空串等同于没提要求，不必落进 Job 输入里污染重放
+        ...(body.directive ? { directive: body.directive } : {}),
       },
     });
     reply.code(202);

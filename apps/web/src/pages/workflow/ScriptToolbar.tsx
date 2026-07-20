@@ -4,9 +4,12 @@
 // 全页仅此一个主按钮——「开始分镜规划」。剧本页负责写作，
 // 把剧本交给导演的动作只该有一个入口，且不该藏在右栏的设置卡片里。
 
+import { useMemo, useState } from 'react';
 import {
   Button,
   Dropdown,
+  Empty,
+  Modal,
   Space,
   Tag,
   Tooltip,
@@ -22,11 +25,13 @@ import {
   PlusOutlined,
   StarOutlined,
   SwapOutlined,
+  TagsOutlined,
   ThunderboltOutlined,
   UndoOutlined,
 } from '@ant-design/icons';
 import type { ScriptDraft } from '../../api/workflow-hooks';
 import { formatDuration, type ParsedScript } from '../../utils/script-parse';
+import { annotateMentions, type AnnotationElements } from '../../utils/annotate-mentions';
 
 const { Text } = Typography;
 
@@ -52,6 +57,10 @@ export function ScriptToolbar({
   undoAvailable,
   onUndo,
   undoing,
+  fullText,
+  elements,
+  onAnnotate,
+  annotating,
 }: {
   draft: ScriptDraft | null;
   drafts: ScriptDraft[] | undefined;
@@ -75,8 +84,49 @@ export function ScriptToolbar({
   undoAvailable: boolean;
   onUndo: () => void;
   undoing: boolean;
+  /** 编辑器当前正文（未必已落库）：@ 标注以用户眼前这一版为准 */
+  fullText: string;
+  /** 要素清单；缺省则「标注要素」禁用 */
+  elements?: AnnotationElements;
+  /** 确认标注 → 页面负责落库并留一次性撤销 */
+  onAnnotate: (nextText: string) => void;
+  annotating: boolean;
 }) {
   const { token } = theme.useToken();
+  const [annotateOpen, setAnnotateOpen] = useState(false);
+
+  /**
+   * 标注预览：纯函数算一遍，不写正文。
+   * 【为什么在这里算而不是点开弹窗再算】按钮要按"有没有东西可标"来禁用，
+   * 结果本来就得先有；弹窗复用同一份结果，用户看到的预览与最终写入必然一致。
+   */
+  const annotation = useMemo(
+    () => (elements === undefined ? null : annotateMentions(fullText, elements)),
+    [fullText, elements],
+  );
+
+  /** 改动逐行摊开，供弹窗展示"改动前 → 改动后"；只列真的变了的行 */
+  const annotateDiff = useMemo(() => {
+    if (annotation === null || annotation.added === 0) return [];
+    const before = fullText.split('\n');
+    const after = annotation.text.split('\n');
+    const rows: Array<{ line: number; before: string; after: string }> = [];
+    for (let i = 0; i < before.length; i += 1) {
+      if (before[i] !== after[i]) {
+        rows.push({ line: i + 1, before: before[i] ?? '', after: after[i] ?? '' });
+      }
+    }
+    return rows;
+  }, [annotation, fullText]);
+
+  const annotateDisabledReason =
+    draft === null
+      ? '请先选择或新建剧本稿'
+      : annotation === null
+        ? '要素清单还在加载'
+        : annotation.added === 0
+          ? '正文里已识别的要素都标注过了，没有可新增的 @'
+          : undefined;
 
   // 版本号取该稿在列表里的序号：库里没有版本字段，
   // 而"这是我的第几稿"恰好就是列表顺序，不必为此加数据模型
@@ -135,7 +185,19 @@ export function ScriptToolbar({
     </Button>
   );
 
+  const annotateButton = (
+    <Button
+      icon={<TagsOutlined />}
+      disabled={annotateDisabledReason !== undefined}
+      loading={annotating}
+      onClick={() => setAnnotateOpen(true)}
+    >
+      标注要素
+    </Button>
+  );
+
   return (
+    <>
     <div
       style={{
         display: 'flex',
@@ -190,9 +252,20 @@ export function ScriptToolbar({
 
       {/* ---- 右：两个动作 ---- */}
       {undoAvailable && (
+        // AI 导演改写与 @ 标注共用同一个一次性撤销点，故文案不再限定"对话"
         <Button type="link" size="small" icon={<UndoOutlined />} loading={undoing} onClick={onUndo}>
-          撤销上次对话修改
+          撤销上次修改
         </Button>
+      )}
+
+      {/* 「标注要素」：把正文里的角色/场景/道具显式锚定成 @，
+          让参考图由用户确定，而不是等模型在拆分镜时临场猜 */}
+      {annotateDisabledReason !== undefined ? (
+        <Tooltip title={annotateDisabledReason}>
+          <span>{annotateButton}</span>
+        </Tooltip>
+      ) : (
+        annotateButton
       )}
 
       <Button icon={<CheckCircleOutlined />} onClick={onPreflight} disabled={draft === null}>
@@ -208,6 +281,78 @@ export function ScriptToolbar({
         planButton
       )}
     </div>
+
+    {/* 标注确认弹窗：正文是用户的稿子，任何自动改写都必须先给他看清楚改了哪几行 */}
+    <Modal
+      title="标注要素"
+      open={annotateOpen}
+      okText={annotation === null ? '标注' : `标注 ${annotation.added} 处`}
+      cancelText="取消"
+      confirmLoading={annotating}
+      width={720}
+      onCancel={() => setAnnotateOpen(false)}
+      onOk={() => {
+        if (annotation === null || annotation.added === 0) return;
+        onAnnotate(annotation.text);
+        setAnnotateOpen(false);
+      }}
+      okButtonProps={{ disabled: annotation === null || annotation.added === 0 }}
+      destroyOnClose
+    >
+      {annotation === null || annotation.added === 0 ? (
+        <Empty description="没有可新增的标注" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+      ) : (
+        <>
+          <Text>
+            将在 {annotateDiff.length} 行动作/环境描写里新增 {annotation.added} 处 @ 标注。
+          </Text>
+          <div style={{ margin: '10px 0' }}>
+            <Space size={[4, 4]} wrap>
+              {annotation.names.map((n) => (
+                <Tag key={n} style={{ marginInlineEnd: 0 }}>
+                  {n}
+                </Tag>
+              ))}
+            </Space>
+          </div>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            对白行与场景标题行一律不动；@场景 只做文字锚定，如需强制发参考图请自行改成
+            @!场景。标注后可在工具栏「撤销上次修改」一键还原。
+          </Text>
+
+          <div
+            style={{
+              marginTop: 12,
+              maxHeight: 320,
+              overflowY: 'auto',
+              border: `1px solid ${token.colorBorderSecondary}`,
+              borderRadius: token.borderRadiusLG,
+            }}
+          >
+            {annotateDiff.map((row) => (
+              <div
+                key={row.line}
+                style={{
+                  padding: '8px 12px',
+                  borderBottom: `1px solid ${token.colorBorderSecondary}`,
+                  fontSize: 13,
+                  lineHeight: 1.8,
+                }}
+              >
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  第 {row.line} 行
+                </Text>
+                <div style={{ color: token.colorTextTertiary, textDecoration: 'line-through' }}>
+                  {row.before}
+                </div>
+                <div style={{ color: token.colorText }}>{row.after}</div>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </Modal>
+    </>
   );
 }
 

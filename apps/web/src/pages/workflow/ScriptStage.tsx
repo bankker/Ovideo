@@ -39,8 +39,10 @@ import { SceneNavigator } from './SceneNavigator';
 import { StructuredScriptEditor } from './StructuredScriptEditor';
 import { SceneInspector } from './SceneInspector';
 import { AIDirectorPanel } from './AIDirectorPanel';
-import { ScriptPreflight } from './ScriptPreflight';
+import { StoryboardPlanningWizard } from './StoryboardPlanningWizard';
 import { parseScript } from '../../utils/script-parse';
+import { useProjectTags } from '../../api/design-hooks';
+import { collectScriptElements } from '../../utils/script-elements';
 
 const { Text } = Typography;
 
@@ -48,6 +50,8 @@ const { Text } = Typography;
 interface GenerateStoryboardPayload {
   draftId: string;
   modelConfigId?: string;
+  /** 分镜规划向导拼出来的中文导演说明；未走向导（老路径）时不带 */
+  directive?: string;
 }
 
 /**
@@ -197,6 +201,18 @@ export function ScriptStage() {
   const parsed = useMemo(() => parseScript(content), [content]);
   const scenes = parsed.scenes;
 
+  /* ---------- 要素清单 ---------- */
+  /**
+   * 剧本里的角色/场景/道具与项目标签对齐后的结果。编辑器的高亮、工具栏的「标注要素」
+   * 与体检的"即将新建"都读这一份，口径只有一处——否则会出现
+   * "编辑器把它标成角色、体检说它是道具"这种自相矛盾。
+   */
+  const projectTags = useProjectTags(projectId);
+  const elements = useMemo(
+    () => collectScriptElements(parsed, projectTags.data ?? []),
+    [parsed, projectTags.data],
+  );
+
   /** 当前场景：编辑器点击与导航点击共同维护 */
   const [activeSceneIndex, setActiveSceneIndex] = useState(0);
   /** 每次自增即请求编辑器把当前场景滚入视野（点击块本身时不动它，免得打断写字） */
@@ -224,6 +240,10 @@ export function ScriptStage() {
     setActiveSceneIndex(0);
   }, [selectedDraftId]);
 
+  /* ---------- 剧本体检 / 分镜规划向导 ---------- */
+  /** null = 关闭；'check' = 只读体检；'plan' = 三步规划向导 */
+  const [preflightMode, setPreflightMode] = useState<'check' | 'plan' | null>(null);
+
   /* ---------- 分镜规划 + Job 轮询 ---------- */
   const generate = useGenerateStoryboard();
   /* 文本模型选择（分镜规划、AI 导演、创作入口共用；undefined = 自动调度 + 失效转移） */
@@ -243,6 +263,8 @@ export function ScriptStage() {
     if (!job || job.id !== runningJobId) return;
     if (job.status === 'SUCCEEDED') {
       message.success('分镜生成完成，可到顶部「分镜」阶段查看');
+      // 生成成功才关向导：整个规划过程用户都停留在向导里，失败时留在原地即可重试
+      setPreflightMode(null);
       pendingSelectLatestRef.current = true;
       void qc.invalidateQueries({ queryKey: ['storyboards', episodeId] });
       setRunningJobId(null);
@@ -280,20 +302,19 @@ export function ScriptStage() {
     });
   };
 
-  /** 体检通过后真正发起（「开始分镜规划」本身只负责打开体检面板） */
-  const handleConfirmPlan = () => {
-    setPreflightMode(null);
+  /**
+   * 向导第三步按下「生成分镜」：把三步攒出来的导演说明随请求一起发出去。
+   * 【为什么不在这里关向导】生成是异步 Job，关掉向导后用户只剩一行小字进度；
+   * 留在向导里，成功时由 Job 轮询关闭，失败时原地显示错误并重试。
+   */
+  const handleConfirmPlan = (directive: string) => {
     if (selectedDraft === null) return;
     if (dirty) {
       message.warning('请先保存剧本内容再生成');
       return;
     }
-    submitGenerate({ draftId: selectedDraft.id, modelConfigId: textModelId });
+    submitGenerate({ draftId: selectedDraft.id, modelConfigId: textModelId, directive });
   };
-
-  /* ---------- 剧本体检 / 分镜规划面板 ---------- */
-  /** null = 关闭；'check' = 只读体检；'plan' = 规划前置检查（底部可继续） */
-  const [preflightMode, setPreflightMode] = useState<'check' | 'plan' | null>(null);
 
   /* ---------- 分镜上下文（仅供「改分镜」对话，页面不再展示镜头） ---------- */
   const storyboardsQuery = useStoryboards(episodeId);
@@ -341,6 +362,30 @@ export function ScriptStage() {
       setContent(nextScript);
       setUndoSnapshot({ draftId: selectedDraft.id, content: before });
       message.success('已写入剧本，可在顶部工具栏撤销');
+    },
+    [selectedDraft, content, updateDraft],
+  );
+
+  /**
+   * 「标注要素」：把工具栏算好的新正文落库。
+   * 复用 AI 导演那一份撤销点——两者都是"整篇被改写"，用户需要的退路完全一样，
+   * 不必为标注再造一套撤销栈。
+   */
+  const handleAnnotate = useCallback(
+    (nextText: string) => {
+      if (selectedDraft === null || nextText === content) return;
+      const before = content;
+      updateDraft.mutate(
+        { draftId: selectedDraft.id, content: nextText },
+        {
+          onSuccess: () => {
+            setContent(nextText);
+            setUndoSnapshot({ draftId: selectedDraft.id, content: before });
+            message.success('已标注要素，可在顶部工具栏撤销');
+          },
+          onError: (e) => message.error(e.message),
+        },
+      );
     },
     [selectedDraft, content, updateDraft],
   );
@@ -418,13 +463,21 @@ export function ScriptStage() {
           if (selectedDraft !== null) handleSetMain(selectedDraft.id);
         }}
         onPreflight={() => setPreflightMode('check')}
-        onPlanStoryboard={() => setPreflightMode('plan')}
+        onPlanStoryboard={() => {
+          // 重新进入向导 = 重新来一次：把上一次的失败提示清掉，否则第三步会顶着一条旧错误
+          setGenerateFailure(null);
+          setPreflightMode('plan');
+        }}
         planDisabled={planDisabledReason !== undefined}
         planDisabledReason={planDisabledReason}
         planning={generating}
         undoAvailable={undoSnapshot !== null && undoSnapshot.draftId === selectedDraft?.id}
         onUndo={handleUndoRewrite}
         undoing={updateDraft.isPending}
+        fullText={content}
+        elements={elements}
+        onAnnotate={handleAnnotate}
+        annotating={updateDraft.isPending}
       />
 
       {/* 生成成功后静默判重：发现拆裂标签才显示横幅（干净时零打扰） */}
@@ -528,6 +581,7 @@ export function ScriptStage() {
                 activeSceneIndex={activeSceneIndex}
                 onActiveSceneChange={setActiveSceneIndex}
                 scrollToken={scrollToken}
+                elements={elements}
               />
             </div>
 
@@ -635,14 +689,17 @@ export function ScriptStage() {
         )}
       </div>
 
-      {/* 剧本体检 / 分镜规划前置检查：两个入口共用同一块面板，只是底部动作不同 */}
-      <ScriptPreflight
+      {/* 剧本体检 / 分镜规划：同一个向导，'check' 只走第一步，'plan' 走完整三步 */}
+      <StoryboardPlanningWizard
         open={preflightMode !== null}
         mode={preflightMode ?? 'plan'}
         projectId={projectId}
+        episodeId={episodeId}
         parsed={parsed}
+        generating={generating}
+        failure={generateFailure?.detail ?? null}
         onCancel={() => setPreflightMode(null)}
-        onConfirm={handleConfirmPlan}
+        onGenerate={handleConfirmPlan}
       />
 
       {/* 重命名弹窗 */}

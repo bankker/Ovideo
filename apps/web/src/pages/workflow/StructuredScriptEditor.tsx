@@ -31,6 +31,13 @@ import {
   type ParsedScript,
   type ScriptLine,
 } from '../../utils/script-parse';
+import {
+  buildElementIndex,
+  splitLineByElements,
+  type AnnotationElements,
+  type ElementIndexEntry,
+  type ElementNameType,
+} from '../../utils/annotate-mentions';
 
 const { Text } = Typography;
 
@@ -64,6 +71,7 @@ export function StructuredScriptEditor({
   activeSceneIndex,
   onActiveSceneChange,
   scrollToken,
+  elements,
 }: {
   parsed: ParsedScript;
   fullText: string;
@@ -75,8 +83,15 @@ export function StructuredScriptEditor({
   onActiveSceneChange: (index: number) => void;
   /** 变化即把 activeSceneIndex 对应的块滚入视野（由场景导航的点击驱动） */
   scrollToken: number;
+  /** 要素清单：预览态据此给角色/场景/道具着色。不传则完全退回改版前的渲染 */
+  elements?: AnnotationElements;
 }) {
   const { token } = theme.useToken();
+  /** 匹配表按长度倒序，最长优先——高亮与「标注要素」共用同一份规则，不会各说各话 */
+  const elementIndex = useMemo(
+    () => (elements === undefined ? [] : buildElementIndex(elements)),
+    [elements],
+  );
   const [editing, setEditing] = useState<EditingState | null>(null);
   /** 进入编辑态后要落的光标位置；用完即清 */
   const pendingCaretRef = useRef<number | null>(null);
@@ -174,6 +189,7 @@ export function StructuredScriptEditor({
           onEndEdit={endEdit}
           onFocusScene={() => onActiveSceneChange(scene.index)}
           token={token}
+          elementIndex={elementIndex}
         />
       ))}
 
@@ -200,6 +216,7 @@ interface SceneBlockProps {
   onEndEdit: () => void;
   onFocusScene: () => void;
   token: GlobalToken;
+  elementIndex: ElementIndexEntry[];
 }
 
 const SceneBlock = forwardRef<HTMLDivElement, SceneBlockProps>(function SceneBlock(
@@ -214,6 +231,7 @@ const SceneBlock = forwardRef<HTMLDivElement, SceneBlockProps>(function SceneBlo
     onEndEdit,
     onFocusScene,
     token,
+    elementIndex,
   },
   ref,
 ) {
@@ -274,7 +292,12 @@ const SceneBlock = forwardRef<HTMLDivElement, SceneBlockProps>(function SceneBlo
             }}
           />
         ) : (
-          <ScenePreview scene={scene} onBeginEdit={onBeginEdit} token={token} />
+          <ScenePreview
+            scene={scene}
+            onBeginEdit={onBeginEdit}
+            token={token}
+            elementIndex={elementIndex}
+          />
         )}
       </div>
     </div>
@@ -299,10 +322,12 @@ function ScenePreview({
   scene,
   onBeginEdit,
   token,
+  elementIndex,
 }: {
   scene: ParsedScene;
   onBeginEdit: (caretOffset: number) => void;
   token: GlobalToken;
+  elementIndex: ElementIndexEntry[];
 }) {
   // 抬头行已经由抬头条呈现，正文里不再重复一遍
   const bodyLines = scene.lines[0]?.kind === 'heading' ? scene.lines.slice(1) : scene.lines;
@@ -336,6 +361,7 @@ function ScenePreview({
           key={i}
           line={line}
           token={token}
+          elementIndex={elementIndex}
           onClick={() => handleLineClick(i)}
         />
       ))}
@@ -368,10 +394,12 @@ function readIntraLineOffset(): number {
 function PreviewLine({
   line,
   token,
+  elementIndex,
   onClick,
 }: {
   line: ScriptLine;
   token: GlobalToken;
+  elementIndex: ElementIndexEntry[];
   onClick: () => void;
 }) {
   const baseStyle: CSSProperties = {
@@ -416,7 +444,7 @@ function PreviewLine({
 
   return (
     <div onClick={onClick} style={{ ...baseStyle, color: token.colorTextSecondary }}>
-      {line.raw}
+      <ElementText raw={line.raw} token={token} elementIndex={elementIndex} />
       {issue !== null && (
         <Tooltip title="该行可能无法被自动拆分镜识别为对白">
           <ExclamationCircleOutlined
@@ -427,3 +455,69 @@ function PreviewLine({
     </div>
   );
 }
+
+/* ---------------- 要素高亮 ---------------- */
+
+/** 三类要素的颜色一律取自 token（主色/成功/警告），换主题与暗色自动跟随 */
+function elementColor(type: ElementNameType, token: GlobalToken): string {
+  if (type === 'CHARACTER') return token.colorPrimary; // 与对白行的说话人同色，认人只需记一种颜色
+  if (type === 'SCENE') return token.colorSuccess;
+  return token.colorWarning;
+}
+
+/**
+ * 动作/环境行的正文：把要素名按类型着色，带 @ 的额外加一条虚线下划线。
+ *
+ * 【只给动作行上色】台词里出现的人名是角色在称呼别人，不是画面里的引用，
+ * 着色会误导用户去 @ 它——而「标注要素」恰恰绝不会动对白行。两处口径必须一致。
+ *
+ * 【caret 定位】只读视图靠 data-line-base 还原点击落点：anchorOffset 是相对**所在文本节点**的，
+ * 一旦把一行拆成多个 span，每个 span 都必须带上自己在行内的起始下标，否则点击后光标会错位。
+ * 无要素命中时刻意退回单个文本节点，DOM 与改版前逐字相同（base 缺省 0 的老路径继续成立）。
+ */
+function ElementText({
+  raw,
+  token,
+  elementIndex,
+}: {
+  raw: string;
+  token: GlobalToken;
+  elementIndex: ElementIndexEntry[];
+}) {
+  const segments = useMemo(() => splitLineByElements(raw, elementIndex), [raw, elementIndex]);
+
+  if (!segments.some((s) => s.element !== null)) return <>{raw}</>;
+
+  return (
+    <>
+      {segments.map((seg, i) =>
+        seg.element === null ? (
+          <span key={i} data-line-base={seg.start}>
+            {seg.text}
+          </span>
+        ) : (
+          <span
+            key={i}
+            data-line-base={seg.start}
+            title={`${ELEMENT_TYPE_LABEL[seg.element.type]}${seg.element.annotated ? '（已标注）' : ''}`}
+            style={{
+              color: elementColor(seg.element.type, token),
+              // 已显式 @ 标注：一条细虚线，表示"这处引用是用户确定过的"
+              textDecoration: seg.element.annotated ? 'underline' : undefined,
+              textDecorationStyle: seg.element.annotated ? 'dotted' : undefined,
+              textUnderlineOffset: 3,
+            }}
+          >
+            {seg.text}
+          </span>
+        ),
+      )}
+    </>
+  );
+}
+
+const ELEMENT_TYPE_LABEL: Record<ElementNameType, string> = {
+  CHARACTER: '角色',
+  SCENE: '场景',
+  PROP: '道具',
+};

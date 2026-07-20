@@ -147,12 +147,28 @@ export function useUpdateScriptDraft(episodeId: string) {
 
 /** ---------- 三步生成 + Job 轮询 ---------- */
 
+/**
+ * 发起三步生成。
+ * directive 是分镜规划向导拼出来的中文导演说明（拆镜风格、目标时长、节奏等），
+ * 服务端把它整段插进提示词的「导演要求」；不传时服务端行为与从前完全一致。
+ */
 export function useGenerateStoryboard() {
   return useMutation({
-    mutationFn: ({ draftId, modelConfigId }: { draftId: string; modelConfigId?: string }) =>
+    mutationFn: ({
+      draftId,
+      modelConfigId,
+      directive,
+    }: {
+      draftId: string;
+      modelConfigId?: string;
+      directive?: string;
+    }) =>
       api<JobEntity>(`/script-drafts/${draftId}/generate-storyboard`, {
         method: 'POST',
-        body: modelConfigId !== undefined ? { modelConfigId } : {},
+        body: {
+          ...(modelConfigId !== undefined ? { modelConfigId } : {}),
+          ...(directive !== undefined && directive !== '' ? { directive } : {}),
+        },
       }),
   });
 }

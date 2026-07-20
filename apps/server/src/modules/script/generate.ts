@@ -104,14 +104,30 @@ export function buildStoryboardPrompt(
   script: string,
   tags: Array<Pick<Tag, 'name' | 'type'>>,
   stylePrompt = '',
+  /**
+   * 导演要求：前端分镜规划向导拼出来的一段中文说明。
+   * 【为什么放在通用规则之前】它是用户对这一集的具体决定（拆多少镜、什么节奏），
+   * 而后面的 A/B/C 条是全系统通用底线。先读要求、再读底线，冲突时底线胜出——
+   * 所以段落里明写了"与硬性约束冲突时以硬性约束为准"。
+   * 缺省为空串时整段不出现，提示词与加这个参数之前逐字一致（向后兼容）。
+   */
+  directive = '',
 ): string {
   const byType = (type: string, label: string) => {
     const names = tags.filter((t) => t.type === type).map((t) => t.name);
     return `${label}：${names.length > 0 ? names.join('、') : '（无）'}`;
   };
+  const directiveBlock = directive.trim()
+    ? [
+        '【导演要求（用户为这一集指定，请尽量遵守；与下面的硬性约束冲突时以硬性约束为准）】',
+        directive.trim(),
+        '',
+      ]
+    : [];
   return [
     '你是专业的漫剧分镜师。请将下面的剧本先拆分为「场景」，再在每个场景内部拆分为多个「镜头」。',
     '',
+    ...directiveBlock,
     '【第一级：场景】',
     'A1. 同一时间、同一地点的连续剧情属于同一个场景；时间跳跃、地点转移、或明确的转场标记处必须切新场景。',
     'A2. 每个场景要填全：title（场景名，如「客户会议室」）、location（地点，通常与 title 同源）、'
@@ -227,7 +243,7 @@ export function createStoryboardGenerator({ textGen }: { textGen: TextGenFn }) {
     ctx: StoryboardGeneratorCtx,
   ): Promise<{ output: { storyboardId: string; shotCount: number; sceneCount: number } }> {
     const { db, job, updateProgress } = ctx;
-    const input = parseJson<{ scriptDraftId?: string }>(job.inputJson, {});
+    const input = parseJson<{ scriptDraftId?: string; directive?: string }>(job.inputJson, {});
     if (!input.scriptDraftId) throw badRequest('任务输入缺少 scriptDraftId');
 
     const draft = await db.scriptDraft.findUnique({
@@ -239,7 +255,12 @@ export function createStoryboardGenerator({ textGen }: { textGen: TextGenFn }) {
 
     const existingTags = await db.tag.findMany({ where: { projectId } });
     const project = await db.project.findUnique({ where: { id: projectId } });
-    const prompt = buildStoryboardPrompt(draft.content, existingTags, project?.stylePrompt ?? '');
+    const prompt = buildStoryboardPrompt(
+      draft.content,
+      existingTags,
+      project?.stylePrompt ?? '',
+      input.directive ?? '',
+    );
     await updateProgress(10);
 
     const attempt = async (): Promise<SceneAwareShotInput[]> =>

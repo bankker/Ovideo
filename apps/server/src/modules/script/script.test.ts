@@ -343,6 +343,43 @@ describe('generate-storyboard 路由', () => {
     });
   });
 
+  it('带 directive → 透传到 inputPayload（分镜规划向导的导演说明）', async () => {
+    const d = await tdb.db.scriptDraft.create({
+      data: { episodeId: episode.id, content: '剧本全文' },
+    });
+    const directive = '拆镜风格：商业快剪。目标总时长约 45 秒，建议 15 个镜头。';
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/script-drafts/${d.id}/generate-storyboard`,
+      payload: { directive },
+    });
+    expect(res.statusCode).toBe(202);
+    expect(enqueue).toHaveBeenCalledWith({
+      projectId: project.id,
+      type: 'GENERATE_STORYBOARD',
+      executor: 'API',
+      inputPayload: { scriptDraftId: d.id, directive },
+    });
+  });
+
+  it('directive 为空串 → 不写进 inputPayload（等同于没提要求）', async () => {
+    const d = await tdb.db.scriptDraft.create({
+      data: { episodeId: episode.id, content: '剧本全文' },
+    });
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/script-drafts/${d.id}/generate-storyboard`,
+      payload: { directive: '' },
+    });
+    expect(res.statusCode).toBe(202);
+    expect(enqueue).toHaveBeenCalledWith({
+      projectId: project.id,
+      type: 'GENERATE_STORYBOARD',
+      executor: 'API',
+      inputPayload: { scriptDraftId: d.id },
+    });
+  });
+
   it('未知剧本稿 404 且不入队', async () => {
     const res = await app.inject({
       method: 'POST',

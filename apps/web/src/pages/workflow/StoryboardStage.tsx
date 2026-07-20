@@ -29,6 +29,7 @@ import {
 } from '@ant-design/icons';
 import type { CapabilityEntry, StaleReason, TagType } from '@ovideo/shared';
 import { useApplyPatch, useStoryboards } from '../../api/workflow-hooks';
+import { useProject } from '../../api/hooks';
 import {
   parseAgentRounds,
   useAgentRuns,
@@ -98,7 +99,7 @@ function parseStaleReasons(raw: string): StaleReason[] {
 
 /** 画面分镜阶段：镜头卡片列（关键图抽卡 + 选定 + stale 溯源）+ 待重生成汇总条 */
 export function StoryboardStage() {
-  const { episodeId = '' } = useParams();
+  const { projectId = '', episodeId = '' } = useParams();
   const qc = useQueryClient();
 
   /* ---------- 版本选择（默认最新） ---------- */
@@ -138,8 +139,16 @@ export function StoryboardStage() {
   const generateKeyframe = useGenerateKeyframe();
   const [batchSubmitting, setBatchSubmitting] = useState(false);
 
-  /* ---------- 画面比例（页面级，所有镜头共用；映射为生成 size） ---------- */
-  const [ratio, setRatio] = useState<AspectRatio>('9:16');
+  /* ---------- 画面比例（映射为生成 size） ----------
+   * 初值取项目画幅：此前是纯组件内 state，每次进页面都重置回竖屏，
+   * 用户在分镜规划向导里选了 16:9 也不生效，横屏项目要在多处反复改。
+   * 改这里只影响本次会话；要长期生效请改项目画幅。
+   */
+  const projectQuery = useProject(projectId !== '' ? projectId : undefined);
+  const projectRatio = (projectQuery.data as { aspectRatio?: string } | undefined)?.aspectRatio;
+  const [ratio, setRatio] = useState<AspectRatio | null>(null);
+  const effectiveRatio: AspectRatio =
+    ratio ?? ((projectRatio ?? '9:16') as AspectRatio);
 
   useEffect(() => {
     if (batchPolling && staleQuery.isSuccess && staleShots.length === 0) {
@@ -155,7 +164,7 @@ export function StoryboardStage() {
     let submitted = 0;
     for (const s of staleShots) {
       try {
-        await generateKeyframe.mutateAsync({ shotId: s.id, size: RATIO_TO_SIZE[ratio] });
+        await generateKeyframe.mutateAsync({ shotId: s.id, size: RATIO_TO_SIZE[effectiveRatio] });
         submitted += 1;
       } catch (e) {
         message.error(e instanceof Error ? e.message : '提交重生成失败');
@@ -253,7 +262,7 @@ export function StoryboardStage() {
               episodeId={episodeId}
               storyboardId={selectedStoryboardId ?? ''}
               imageModels={imageModels}
-              ratio={ratio}
+              ratio={effectiveRatio}
               onRatioChange={setRatio}
               patching={applyPatch.isPending}
               refCells={resolvedByShot.get(shot.id) ?? []}
