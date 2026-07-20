@@ -1,5 +1,11 @@
 # Caddy：自动 TLS + 口令闸 + 同源路由
 # 前端用相对路径 /api、/storage，所以 SPA 与后端同源即可，无需改任何应用代码。
+
+# www 统一跳到主域（否则 www 解析到本机却没有证书 → TLS 握手失败）
+www.{$OVIDEO_DOMAIN} {
+	redir https://{$OVIDEO_DOMAIN}{uri} permanent
+}
+
 {$OVIDEO_DOMAIN} {
 	encode zstd gzip
 

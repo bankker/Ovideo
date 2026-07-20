@@ -58,26 +58,48 @@ cd /opt/ovideo/deploy && sudo docker compose up -d --build
 
 `.env`、`Caddyfile` 里的凭据和两个数据卷都不会被覆盖。
 
-## DNS（根域直达，无子域）
+## DNS：已迁到 Google Cloud DNS
 
-在 GoDaddy（`wangrui.computer` 的 NS 是 ns27/28.domaincontrol.com）把**根域**指到这台机器：
+DNS 原本托管在 GoDaddy，每改一条记录都得人工登录。现已迁到本项目的 Cloud DNS
+（区名 `wangrui`），之后**所有记录都能用 gcloud 改，不必再登 GoDaddy**。
 
-1. **删掉** `@` 现有的 4 条 A 记录（`216.239.32.21` / `.34.21` / `.36.21` / `.38.21` —— 失效的 Google 域名转发）
-2. **删掉** `@` 现有的 AAAA 记录（`2001:4860:4802:3x::15`）—— **必须删**，否则支持 IPv6 的浏览器仍会走到 Google 那个死地址
-3. **新增**：
+迁移安全的前提（迁移前已盘点确认）：该域**没有 MX 记录**，不收邮件，
+所以不存在"迁 DNS 搞挂邮箱"这个最大风险。需要保留的只有 `star` 与一条站点验证 TXT。
 
-| 类型 | 名称 | 值 | TTL |
+区内记录：
+
+| 名称 | 类型 | 值 | 用途 |
 |---|---|---|---|
-| A | `@` | `35.201.179.130` | 600 |
+| `@` | A | `35.201.179.130` | Ovideo（本机） |
+| `www` | A | `35.201.179.130` | Ovideo，Caddy 内跳主域 |
+| `star` | CNAME | `ghs.googlehosted.com.` | Starstudio（Cloud Run） |
+| `@` | TXT | `google-site-verification=…` | 站点验证 |
 
-4. `www` 同样指向 Google，按需删掉或改成 A → `35.201.179.130`
+> 根域**只能用 A 记录**（CNAME 在 apex 不合法），正好这台虚拟机有固定 IP。
+> `star` 用 CNAME → `ghs.googlehosted.com` 是 Cloud Run 专用写法，别套用到根域。
 
-加完 Caddy 会自动签发 Let's Encrypt 证书（每 60 秒重试一次，最长重试 30 天）。
+### 一次性：把 GoDaddy 的 nameserver 改到 Cloud DNS
 
-> **不受影响**：`star.wangrui.computer`（Starstudio）是独立的子域记录，改根域不会动到它。
->
-> 根域**只能用 A 记录**（CNAME 在 apex 不合法），正好这台是虚拟机有固定 IP。
-> 而 `star` 用的是 CNAME → `ghs.googlehosted.com`，那是 Cloud Run 专用，别照抄。
+GoDaddy → 我的产品 → `wangrui.computer` → 管理 DNS → 域名服务器 → 更改 → 使用自定义域名服务器：
+
+```
+ns-cloud-d1.googledomains.com
+ns-cloud-d2.googledomains.com
+ns-cloud-d3.googledomains.com
+ns-cloud-d4.googledomains.com
+```
+
+生效后 GoDaddy 里的记录不再起作用（一切以 Cloud DNS 为准），Caddy 会自动签发证书。
+
+### 以后改记录（不用碰 GoDaddy）
+
+```bash
+Z=wangrui; P=gen-lang-client-0542115635
+gcloud dns record-sets list --zone $Z --project $P
+gcloud dns record-sets create app.wangrui.computer. --zone $Z --project $P --type A --ttl 600 --rrdatas 1.2.3.4
+gcloud dns record-sets update wangrui.computer.     --zone $Z --project $P --type A --ttl 600 --rrdatas 5.6.7.8
+gcloud dns record-sets delete old.wangrui.computer. --zone $Z --project $P --type A
+```
 
 ## 排障
 
