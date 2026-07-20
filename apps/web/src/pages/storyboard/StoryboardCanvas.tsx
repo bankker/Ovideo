@@ -182,7 +182,17 @@ export function StoryboardCanvas({
   useEffect(() => {
     if (selectedSceneId === null) return;
     const node = sectionRefs.current.get(selectedSceneId);
-    node?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    if (!node) return;
+    /**
+     * 瞬时滚动，不用 behavior:'smooth'。
+     * 【为什么】smooth 在应用内置浏览器里会被静默无视——scrollTop 一动不动，
+     * 不报错也不留痕迹，"点左栏跳到该场"就这么无声无息地失效了。
+     * 曾想过"先试 smooth，一帧后没动就退回瞬时"，但那个判据本身也不可靠：
+     * 选中会改场次标题的高亮样式，布局随之挪动一两像素，于是"没动"永远不成立，
+     * 兜底永远不触发。与其靠猜，不如要一个每次都成立的结果——
+     * 动画是锦上添花，跳转成功才是这个功能本身。
+     */
+    node.scrollIntoView({ behavior: 'instant', block: 'start' });
   }, [selectedSceneId]);
 
   const selectedMovable =

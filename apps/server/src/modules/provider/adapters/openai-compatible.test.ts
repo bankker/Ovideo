@@ -86,7 +86,11 @@ describe('chatComplete', () => {
       ),
     );
 
-    // 超时被翻译为可行动的中文提示（含主机名），不再裸抛 TimeoutError
-    await expect(chatComplete(cfg, messages, { timeoutMs: 30 })).rejects.toThrow(/请求超时：.+无响应/);
+    // 超时被翻译为可行动的中文提示（含主机名与实际等待时长），不再裸抛 TimeoutError。
+    // 措辞必须把超时与"连不上"区分开：从前统一劝人检查代理，会把排查方向带偏——
+    // 握手明明成功了，该调的是超时上限或换个更快的模型。
+    await expect(chatComplete(cfg, messages, { timeoutMs: 30 })).rejects.toThrow(
+      /请求超时：llm\.example\.com 在 30 毫秒内没有返回完整响应。连接本身是通的/,
+    );
   });
 });

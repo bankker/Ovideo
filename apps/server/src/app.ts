@@ -206,6 +206,9 @@ export function registerExecutors(): void {
     textGen: agentTextGen,
   });
 
+  /** 两级分镜生成的超时上限。见下方 chatComplete 调用处的说明 */
+  const STORYBOARD_GEN_TIMEOUT_MS = 300_000;
+
   registerExecutor('GENERATE_STORYBOARD', async (ctx) => {
     const input = parseJson<{ scriptDraftId?: string; modelConfigId?: string }>(
       ctx.job.inputJson,
@@ -231,7 +234,14 @@ export function registerExecutors(): void {
           model: model.key,
         };
         textGen = async (prompt: string) =>
-          chatComplete(cfg, [{ role: 'user', content: prompt }], { jsonMode: true });
+          chatComplete(cfg, [{ role: 'user', content: prompt }], {
+            jsonMode: true,
+            // 两级分镜是全流程里最重的一次文本生成：整篇剧本进去，出来是
+            // 场景树 + 每场 2-5 个镜头的完整 JSON（提示词、标签、台词、五个影视语义字段）。
+            // 默认 60s 打不住——实测千问在 1650 字的剧本上就会超时，
+            // 而超时被报成"网络不可达/需要代理"，让人往连通性上排查，其实网络好得很。
+            timeoutMs: STORYBOARD_GEN_TIMEOUT_MS,
+          });
       } else {
         throw badRequest('该模型所属厂商未配置 Base URL，无法调用');
       }

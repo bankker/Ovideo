@@ -46,9 +46,15 @@ export async function chatComplete(
       }
     })();
     const isTimeout = err instanceof Error && err.name === 'TimeoutError';
+    const timeoutMs = opts?.timeoutMs ?? 60000;
+    // 不足 1 秒的上限（测试里会用）四舍五入成 "0 秒" 就成了废话，改用毫秒表述
+    const waited = timeoutMs >= 1000 ? `${Math.round(timeoutMs / 1000)} 秒` : `${timeoutMs} 毫秒`;
     throw new Error(
       isTimeout
-        ? `请求超时：${host} 无响应（国内直连国外服务通常需要代理）`
+        ? // 超时 ≠ 连不上：TCP 握手成功、请求也发出去了，只是模型在限定时间内没答完。
+          // 从前这里也劝人"检查代理"，于是排查方向被带偏——真正该调的是超时上限或换个模型。
+          `请求超时：${host} 在 ${waited}内没有返回完整响应。` +
+          `连接本身是通的，通常是这次生成的输出太长或模型太慢，而不是网络问题。`
         : `网络不可达：无法连接 ${host}（国内直连国外服务通常需要代理，或检查网络）`,
     );
   }
