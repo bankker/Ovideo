@@ -1,0 +1,21 @@
+# 构建上下文瘦身 + 防止本地状态/密钥被烘进镜像
+.git
+node_modules
+**/node_modules
+**/dist
+**/.turbo
+
+# 本地状态：数据库与已生成媒体绝不进镜像（生产用命名卷）
+**/*.db
+**/*.db-journal
+**/*.db-wal
+apps/server/storage
+
+# 本地环境与密钥
+**/.env
+**/.env.*
+!**/.env.example
+
+.claude
+docs
+**/*.log

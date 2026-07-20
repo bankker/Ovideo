@@ -1,27 +1,18 @@
-import {
-  useCallback,
-  useEffect,
-
-  useRef,
-  useState,
-  type Dispatch,
-  type SetStateAction,
-} from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import {
   Alert,
   Button,
   Card,
-  Divider,
   Empty,
   Input,
   Modal,
   Popconfirm,
-  Segmented,
   Select,
   Space,
   Spin,
+  Tabs,
   Tag,
   Tooltip,
   Typography,
@@ -29,7 +20,6 @@ import {
   theme,
 } from 'antd';
 import {
-  CheckOutlined,
   DeleteOutlined,
   DoubleLeftOutlined,
   DoubleRightOutlined,
@@ -38,16 +28,15 @@ import {
   EditOutlined,
   PlusOutlined,
   ReloadOutlined,
-  SendOutlined,
   StarOutlined,
   ThunderboltOutlined,
+  UndoOutlined,
   WarningOutlined,
 } from '@ant-design/icons';
 import type {
   CapabilityEntry,
   ShotEditableFields,
   StoryboardPatch,
-  StoryboardPatchOp,
   TagType,
 } from '@ovideo/shared';
 import {
@@ -61,12 +50,15 @@ import {
   useUpdateScriptDraft,
   type ScriptDraft,
   type ShotDetail,
-  type StoryboardDetail,
 } from '../../api/workflow-hooks';
 import { TagDedup } from '../../components/TagDedup';
 import { useCapabilities } from '../../api/produce-hooks';
-import { useScriptChat } from '../../api/chat-hooks';
 import { ScriptStarter } from './ScriptStarter';
+import {
+  ScriptChatDock,
+  type ChatMessage,
+  type ScriptRewriteMessage,
+} from './ScriptChatDock';
 
 const { Text, Paragraph } = Typography;
 
@@ -100,7 +92,11 @@ const EMPTY_NEW_SHOT = {
   dialogue: [] as Array<{ speaker?: string; isNarrator: boolean; text: string }>,
 };
 
-/** 剧本阶段（M1 三步生成表单流）：左 剧本稿列表 / 中 内容编辑 / 右 分镜结果 */
+/**
+ * 剧本阶段：左 剧本稿导航 / 中 剧本文稿（常驻可编辑）/ 右 生成设置 + 对话与分镜结果。
+ * 文稿与对话并置而非互斥——用户一边看着正文一边说"怎么改"，
+ * 才谈得上"对话即编辑"。
+ */
 export function ScriptStage() {
   const { projectId = '', episodeId = '' } = useParams();
   const qc = useQueryClient();
@@ -175,8 +171,6 @@ export function ScriptStage() {
   };
 
   /* ---------- 「从想法开始」入口（新增路径，不影响手工粘贴/编辑链路） ---------- */
-  /** 编辑 / 对话模式（声明在此以便创作入口完成后切回编辑器） */
-  const [mode, setMode] = useState<'edit' | 'chat'>('edit');
   const [starterOpen, setStarterOpen] = useState(false);
   const hasDrafts = (drafts?.length ?? 0) > 0;
   // 一条剧本稿都没有时，创作入口就是这一屏的主视觉（新用户的第一印象）
@@ -189,7 +183,6 @@ export function ScriptStage() {
     // 正文可能还没随查询回来，登记等待——到达后由载入 effect 补一次
     awaitingContentRef.current = draftId;
     setStarterOpen(false);
-    setMode('edit');
     message.success('剧本已生成，可继续编辑或直接「三步生成分镜」');
   }, []);
 
@@ -358,10 +351,54 @@ export function ScriptStage() {
       label: `v${s.version}${s.stale ? '（剧本已变更）' : ''}`,
     }));
 
-  /* ---------- 对话修改模式（M3-lite，v2 §4） ---------- */
+  /* ---------- 对话（改分镜 M3-lite v2 §4 / 改剧本） ---------- */
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [rewriteMessages, setRewriteMessages] = useState<ScriptRewriteMessage[]>([]);
+  /**
+   * 「撤销上次对话修改」的一次性快照：改写覆盖的是整篇正文，
+   * 不给退路的话用户不敢点采纳。只留一份、用完即弃，不引入新数据模型。
+   */
+  const [undoSnapshot, setUndoSnapshot] = useState<{ draftId: string; content: string } | null>(
+    null,
+  );
+
+  // 换稿即清空改剧本的对话与撤销点：A 稿的指令套到 B 稿上没有意义
+  useEffect(() => {
+    setRewriteMessages([]);
+    setUndoSnapshot(null);
+  }, [selectedDraftId]);
+
+  /** 采纳改写：先记下改写前的正文再落库，失败则原样抛回给气泡（保持待决状态） */
+  const handleAdoptRewrite = useCallback(
+    async (nextScript: string) => {
+      if (selectedDraft === null) return;
+      const before = content; // 以编辑器现值为准——用户想退回的是他刚才看到的那一版
+      await updateDraft.mutateAsync({ draftId: selectedDraft.id, content: nextScript });
+      setContent(nextScript);
+      setUndoSnapshot({ draftId: selectedDraft.id, content: before });
+      message.success('已写入剧本，可在标题行撤销');
+    },
+    [selectedDraft, content, updateDraft],
+  );
+
+  const handleUndoRewrite = () => {
+    if (undoSnapshot === null) return;
+    updateDraft.mutate(
+      { draftId: undoSnapshot.draftId, content: undoSnapshot.content },
+      {
+        onSuccess: () => {
+          setContent(undoSnapshot.content);
+          setUndoSnapshot(null);
+          message.success('已撤销上次对话修改');
+        },
+        onError: (e) => message.error(e.message),
+      },
+    );
+  };
 
   /* ---------- 布局 ---------- */
+  /** 右栏下半区：对话与分镜结果分页共处，默认停在对话（这一屏的主交互） */
+  const [dockTab, setDockTab] = useState<'chat' | 'shots'>('chat');
   /** 左侧草稿导航的折叠态：纯展示偏好，不必跨会话保留 */
   const [railCollapsed, setRailCollapsed] = useState(false);
 
@@ -470,69 +507,62 @@ export function ScriptStage() {
                 </span>
               </Tooltip>
               {selectedDraft.isMain && <Tag color="gold">主剧本</Tag>}
+              <span style={{ flex: 1 }} />
+              {/* 采纳改写后才出现，撤销一次即消失——退路就摆在正文旁边，不用去对话里翻 */}
+              {undoSnapshot !== null && undoSnapshot.draftId === selectedDraft.id && (
+                <Button
+                  type="link"
+                  size="small"
+                  icon={<UndoOutlined />}
+                  style={{ padding: 0 }}
+                  loading={updateDraft.isPending}
+                  onClick={handleUndoRewrite}
+                >
+                  撤销上次对话修改
+                </Button>
+              )}
             </div>
 
-            <CanvasToolbar
-              mode={mode}
-              onModeChange={setMode}
-              dirty={dirty}
-              saving={updateDraft.isPending}
-              onSave={saveContent}
-            />
+            <CanvasToolbar dirty={dirty} saving={updateDraft.isPending} onSave={saveContent} />
 
-            {mode === 'edit' ? (
-              <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
-                <Input.TextArea
-                  value={content}
-                  onChange={(e) => setContent(e.target.value)}
-                  onBlur={saveContent}
-                  placeholder="在此粘贴或撰写剧本全文……"
-                  variant="borderless"
-                  style={{
-                    flex: 1,
-                    height: '100%',
-                    resize: 'none',
-                    fontSize: 15,
-                    lineHeight: 1.9,
-                    padding: '0 24px',
-                  }}
-                />
-              </div>
-            ) : (
-              <div style={{ flex: 1, minHeight: 0, display: 'flex', padding: '0 24px' }}>
-                <ScriptChatPanel
-                  draftId={selectedDraft.id}
-                  storyboardId={selectedStoryboardId}
-                  storyboard={storyboard}
-                  modelConfigId={textModelId}
-                  messages={chatMessages}
-                  setMessages={setChatMessages}
-                  applyPatch={applyPatch}
-                  onSwitchStoryboard={setSelectedStoryboardId}
-                />
-              </div>
-            )}
+            <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
+              <Input.TextArea
+                value={content}
+                onChange={(e) => setContent(e.target.value)}
+                onBlur={saveContent}
+                placeholder="在此粘贴或撰写剧本全文……"
+                variant="borderless"
+                style={{
+                  flex: 1,
+                  height: '100%',
+                  resize: 'none',
+                  fontSize: 15,
+                  lineHeight: 1.9,
+                  padding: '0 24px',
+                }}
+              />
+            </div>
           </>
         )}
       </div>
 
-      {/* 右栏：生成设置 + 分镜结果（可折叠） */}
+      {/* 右栏：生成设置 + 对话 / 分镜结果（可折叠） */}
       {collapsed ? (
         <div style={{ width: 40, flexShrink: 0 }}>
-          <Tooltip title="展开生成设置与分镜结果" placement="left">
+          <Tooltip title="展开生成设置、对话与分镜结果" placement="left">
             <Button
               icon={<DoubleLeftOutlined />}
               onClick={() => setCollapsed(false)}
               style={{ width: 40, height: 120, writingMode: 'vertical-rl' }}
             >
-              分镜
+              对话
             </Button>
           </Tooltip>
         </div>
       ) : (
         <div
           style={{
-            width: 300,
+            width: 360,
             flexShrink: 0,
             display: 'flex',
             flexDirection: 'column',
@@ -567,73 +597,112 @@ export function ScriptStage() {
             onDismissFailure={() => setGenerateFailure(null)}
           />
 
-          <Divider style={{ margin: '12px 0' }} />
+          {/* Tabs 只当标签栏用：内容渲染在下面那个 flex:1 容器里，
+              面板高度就由本栏自己的 flex 链决定，不必依赖 antd 内部 content-holder 的高度传导 */}
+          <Tabs
+            size="small"
+            activeKey={dockTab}
+            onChange={(k) => setDockTab(k as 'chat' | 'shots')}
+            tabBarStyle={{ marginBottom: 8 }}
+            style={{ marginTop: 8 }}
+            items={[
+              { key: 'chat', label: '对话' },
+              { key: 'shots', label: '分镜结果' },
+            ]}
+          />
 
-          {/* 分镜结果：小标题 + 版本切换 + 可滚动镜头列表 */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, minHeight: 0, flex: 1 }}>
-            <Text strong style={{ fontSize: 13 }}>
-              分镜结果
-            </Text>
-            <Select
-              size="small"
-              style={{ width: '100%' }}
-              placeholder="暂无版本"
-              value={selectedStoryboardId ?? undefined}
-              options={versionOptions}
-              onChange={(v) => setSelectedStoryboardId(v)}
-            />
-            <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
-              {storyboardsQuery.isLoading || storyboardQuery.isLoading ? (
-                <div style={{ textAlign: 'center', padding: 40 }}>
-                  <Spin />
-                </div>
-              ) : !storyboards || storyboards.length === 0 ? (
+          <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+            {dockTab === 'chat' ? (
+              selectedDraft === null ? (
                 <Empty
                   image={Empty.PRESENTED_IMAGE_SIMPLE}
-                  description="暂无分镜，请点击上方「三步生成分镜」"
-                  style={{ marginTop: 60 }}
-                />
-              ) : !storyboard || storyboard.shots.length === 0 ? (
-                <Empty
-                  image={Empty.PRESENTED_IMAGE_SIMPLE}
-                  description="该版本没有镜头"
-                  style={{ marginTop: 60 }}
+                  description="请先选择或新建剧本稿"
+                  style={{ marginTop: 48 }}
                 />
               ) : (
-                <div>
-                  {[...storyboard.shots]
-                    .sort((a, b) => a.sortOrder - b.sortOrder)
-                    .map((shot, index) => (
-                      <div key={shot.id}>
-                        <ShotCard
-                          shot={shot}
-                          index={index}
-                          patching={applyPatch.isPending}
-                          onUpdateShot={(shotId, fields) =>
-                            runPatch([{ op: 'update_shot', shotId, fields }], 'Prompt 已更新')
-                          }
-                          onRemove={(shotId) => {
-                            void runPatch([{ op: 'remove_shot', shotId }], '已删除镜头').catch(
-                              () => undefined,
-                            );
-                          }}
-                        />
-                        <div style={{ textAlign: 'center', margin: '4px 0 8px' }}>
-                          <Button
-                            type="dashed"
-                            size="small"
-                            icon={<PlusOutlined />}
-                            style={{ fontSize: 12, width: '90%' }}
-                            onClick={() => setInsertState({ afterShotId: shot.id, text: '' })}
-                          >
-                            插入分镜
-                          </Button>
-                        </div>
-                      </div>
-                    ))}
+                <ScriptChatDock
+                  draftId={selectedDraft.id}
+                  modelConfigId={textModelId}
+                  rewriteMessages={rewriteMessages}
+                  setRewriteMessages={setRewriteMessages}
+                  onAdoptRewrite={handleAdoptRewrite}
+                  adopting={updateDraft.isPending}
+                  dirty={dirty}
+                  storyboardId={selectedStoryboardId}
+                  storyboard={storyboard}
+                  storyboardMessages={chatMessages}
+                  setStoryboardMessages={setChatMessages}
+                  applyPatch={applyPatch}
+                  onSwitchStoryboard={setSelectedStoryboardId}
+                />
+              )
+            ) : (
+              /* 分镜结果：版本切换 + 可滚动镜头列表 */
+              <div
+                style={{ display: 'flex', flexDirection: 'column', gap: 8, minHeight: 0, flex: 1 }}
+              >
+                <Select
+                  size="small"
+                  style={{ width: '100%' }}
+                  placeholder="暂无版本"
+                  value={selectedStoryboardId ?? undefined}
+                  options={versionOptions}
+                  onChange={(v) => setSelectedStoryboardId(v)}
+                />
+                <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
+                  {storyboardsQuery.isLoading || storyboardQuery.isLoading ? (
+                    <div style={{ textAlign: 'center', padding: 40 }}>
+                      <Spin />
+                    </div>
+                  ) : !storyboards || storyboards.length === 0 ? (
+                    <Empty
+                      image={Empty.PRESENTED_IMAGE_SIMPLE}
+                      description="暂无分镜，请点击上方「三步生成分镜」"
+                      style={{ marginTop: 60 }}
+                    />
+                  ) : !storyboard || storyboard.shots.length === 0 ? (
+                    <Empty
+                      image={Empty.PRESENTED_IMAGE_SIMPLE}
+                      description="该版本没有镜头"
+                      style={{ marginTop: 60 }}
+                    />
+                  ) : (
+                    <div>
+                      {[...storyboard.shots]
+                        .sort((a, b) => a.sortOrder - b.sortOrder)
+                        .map((shot, index) => (
+                          <div key={shot.id}>
+                            <ShotCard
+                              shot={shot}
+                              index={index}
+                              patching={applyPatch.isPending}
+                              onUpdateShot={(shotId, fields) =>
+                                runPatch([{ op: 'update_shot', shotId, fields }], 'Prompt 已更新')
+                              }
+                              onRemove={(shotId) => {
+                                void runPatch([{ op: 'remove_shot', shotId }], '已删除镜头').catch(
+                                  () => undefined,
+                                );
+                              }}
+                            />
+                            <div style={{ textAlign: 'center', margin: '4px 0 8px' }}>
+                              <Button
+                                type="dashed"
+                                size="small"
+                                icon={<PlusOutlined />}
+                                style={{ fontSize: 12, width: '90%' }}
+                                onClick={() => setInsertState({ afterShotId: shot.id, text: '' })}
+                              >
+                                插入分镜
+                              </Button>
+                            </div>
+                          </div>
+                        ))}
+                    </div>
+                  )}
                 </div>
-              )}
-            </div>
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -879,16 +948,12 @@ function DraftRail({
 
 /** ---------- 画布工具条 ---------- */
 
-/** 正文区上方的轻量工具条：左切模式、右报存盘状态（保存动作仍走页面的 saveContent） */
+/** 正文区上方的轻量工具条：只报存盘状态（保存动作仍走页面的 saveContent） */
 function CanvasToolbar({
-  mode,
-  onModeChange,
   dirty,
   saving,
   onSave,
 }: {
-  mode: 'edit' | 'chat';
-  onModeChange: (mode: 'edit' | 'chat') => void;
   dirty: boolean;
   saving: boolean;
   onSave: () => void;
@@ -896,15 +961,6 @@ function CanvasToolbar({
   const { token } = theme.useToken();
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '0 24px' }}>
-      <Segmented
-        size="small"
-        value={mode}
-        onChange={(v) => onModeChange(v as 'edit' | 'chat')}
-        options={[
-          { label: '编辑', value: 'edit' },
-          { label: '对话', value: 'chat' },
-        ]}
-      />
       <span style={{ flex: 1 }} />
       {saving ? (
         <Text type="secondary" style={{ fontSize: 12 }}>
@@ -1045,267 +1101,6 @@ function SettingsPanel({
           style={{ marginTop: 4 }}
         />
       )}
-    </div>
-  );
-}
-
-/** ---------- 对话修改面板（v2 §4：多轮对话产出 patch → 预览 → 确认应用） ---------- */
-
-interface ChatMessage {
-  id: number;
-  role: 'user' | 'assistant';
-  /** user：指令文本；assistant：summary */
-  text: string;
-  patch?: StoryboardPatch;
-  applied?: boolean;
-}
-
-let chatMessageSeq = 0;
-const nextChatMessageId = () => ++chatMessageSeq;
-
-const SHOT_FIELD_LABEL: Record<string, string> = {
-  sourceText: '原文',
-  imagePrompt: '生图 Prompt',
-  videoPrompt: '视频 Prompt',
-  durationPlannedMs: '时长',
-  tags: '标签',
-  dialogue: '台词',
-};
-
-/** 把 patch op 渲染为中文摘要；镜头序号按当前分镜 shots 的 sortOrder 映射，找不到显示 id 前 6 位 */
-function describePatchOp(op: StoryboardPatchOp, storyboard: StoryboardDetail | undefined): string {
-  const shotLabel = (shotId: string) => {
-    const sorted = [...(storyboard?.shots ?? [])].sort((a, b) => a.sortOrder - b.sortOrder);
-    const idx = sorted.findIndex((s) => s.id === shotId);
-    return idx >= 0 ? `#${idx + 1}` : shotId.slice(0, 6);
-  };
-  switch (op.op) {
-    case 'add_shot':
-      return op.afterShotId != null
-        ? `新增镜头（插入到镜头 ${shotLabel(op.afterShotId)} 之后）`
-        : '新增镜头（追加到末尾）';
-    case 'update_shot': {
-      const fields = Object.keys(op.fields)
-        .map((k) => SHOT_FIELD_LABEL[k] ?? k)
-        .join('、');
-      return `修改镜头 ${shotLabel(op.shotId)} 的 ${fields !== '' ? fields : '内容'}`;
-    }
-    case 'remove_shot':
-      return `删除镜头 ${shotLabel(op.shotId)}`;
-    case 'reorder':
-      return '调整顺序';
-  }
-}
-
-function ScriptChatPanel({
-  draftId,
-  storyboardId,
-  storyboard,
-  modelConfigId,
-  messages,
-  setMessages,
-  applyPatch,
-  onSwitchStoryboard,
-}: {
-  draftId: string;
-  storyboardId: string | null;
-  storyboard: StoryboardDetail | undefined;
-  /** 顶栏选中的文本模型（与三步生成共用；undefined = 自动调度） */
-  modelConfigId?: string;
-  messages: ChatMessage[];
-  setMessages: Dispatch<SetStateAction<ChatMessage[]>>;
-  applyPatch: ReturnType<typeof useApplyPatch>;
-  onSwitchStoryboard: (storyboardId: string) => void;
-}) {
-  const chat = useScriptChat();
-  const { token } = theme.useToken();
-  const [input, setInput] = useState('');
-  const listEndRef = useRef<HTMLDivElement | null>(null);
-
-  // 新消息 / loading 气泡出现时滚到底部
-  useEffect(() => {
-    listEndRef.current?.scrollIntoView({ block: 'end' });
-  }, [messages.length, chat.isPending]);
-
-  if (storyboardId === null) {
-    return (
-      <Empty
-        description="先用三步生成产出首版分镜，再用对话修改"
-        style={{ marginTop: 80 }}
-      />
-    );
-  }
-
-  const handleSend = () => {
-    const text = input.trim();
-    if (text === '' || chat.isPending) return;
-    const userMsgId = nextChatMessageId();
-    setMessages((prev) => [...prev, { id: userMsgId, role: 'user', text }]);
-    chat.mutate(
-      { draftId, message: text, baseStoryboardId: storyboardId, modelConfigId },
-      {
-        onSuccess: (res) => {
-          setInput('');
-          setMessages((prev) => [
-            ...prev,
-            {
-              id: nextChatMessageId(),
-              role: 'assistant',
-              text: res.summary,
-              patch: res.patch,
-              applied: false,
-            },
-          ]);
-        },
-        onError: (e) => {
-          // 失败：撤回本轮 user 气泡并保留输入，便于修改后重发
-          setMessages((prev) => prev.filter((m) => m.id !== userMsgId));
-          message.error(e instanceof Error ? e.message : '发送失败');
-        },
-      },
-    );
-  };
-
-  const handleApply = async (msg: ChatMessage) => {
-    if (msg.applied === true || !msg.patch || msg.patch.length === 0) return;
-    try {
-      const result = await applyPatch.mutateAsync({
-        storyboardId,
-        patch: msg.patch,
-        source: 'chat',
-      });
-      onSwitchStoryboard(result.storyboard.id);
-      setMessages((prev) => prev.map((m) => (m.id === msg.id ? { ...m, applied: true } : m)));
-      message.success('修改已应用，已生成新分镜版本');
-    } catch (e) {
-      message.error(e instanceof Error ? e.message : '应用失败');
-    }
-  };
-
-  return (
-    <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', gap: 8 }}>
-      <Text type="secondary" style={{ fontSize: 12 }}>
-        对话产出的修改先预览后应用，应用后生成新版本，旧版本可随时切回
-      </Text>
-
-      {/* 消息列表 */}
-      <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', paddingRight: 4 }}>
-        {messages.length === 0 && !chat.isPending ? (
-          <Empty
-            image={Empty.PRESENTED_IMAGE_SIMPLE}
-            description="输入修改指令，例如「把第 2 个镜头拆成两个」"
-            style={{ marginTop: 60 }}
-          />
-        ) : (
-          <>
-            {messages.map((msg) =>
-              msg.role === 'user' ? (
-                <div key={msg.id} style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 8 }}>
-                  <div
-                    style={{
-                      maxWidth: '85%',
-                      background: token.colorPrimaryBg,
-                      borderRadius: 8,
-                      padding: '6px 10px',
-                      whiteSpace: 'pre-wrap',
-                      fontSize: 13,
-                    }}
-                  >
-                    {msg.text}
-                  </div>
-                </div>
-              ) : (
-                <div key={msg.id} style={{ display: 'flex', justifyContent: 'flex-start', marginBottom: 8 }}>
-                  <div
-                    style={{
-                      maxWidth: '92%',
-                      background: token.colorFillTertiary,
-                      borderRadius: 8,
-                      padding: '8px 10px',
-                      fontSize: 13,
-                    }}
-                  >
-                    <div style={{ whiteSpace: 'pre-wrap' }}>{msg.text}</div>
-                    {msg.patch && msg.patch.length > 0 && (
-                      <>
-                        <ul style={{ margin: '6px 0 0', paddingInlineStart: 18 }}>
-                          {msg.patch.map((op, i) => (
-                            <li key={i} style={{ fontSize: 12, lineHeight: 1.8 }}>
-                              {describePatchOp(op, storyboard)}
-                            </li>
-                          ))}
-                        </ul>
-                        <div style={{ marginTop: 6 }}>
-                          {msg.applied === true ? (
-                            <Tag icon={<CheckOutlined />} color="success">
-                              已应用
-                            </Tag>
-                          ) : (
-                            <Button
-                              size="small"
-                              type="primary"
-                              loading={applyPatch.isPending}
-                              onClick={() => void handleApply(msg)}
-                            >
-                              应用此修改
-                            </Button>
-                          )}
-                        </div>
-                      </>
-                    )}
-                  </div>
-                </div>
-              ),
-            )}
-            {chat.isPending && (
-              <div style={{ display: 'flex', justifyContent: 'flex-start', marginBottom: 8 }}>
-                <div
-                  style={{
-                    background: token.colorFillTertiary,
-                    borderRadius: 8,
-                    padding: '8px 10px',
-                    fontSize: 13,
-                  }}
-                >
-                  <Space size={8}>
-                    <Spin size="small" />
-                    <Text type="secondary" style={{ fontSize: 12 }}>
-                      正在生成修改建议……
-                    </Text>
-                  </Space>
-                </div>
-              </div>
-            )}
-            <div ref={listEndRef} />
-          </>
-        )}
-      </div>
-
-      {/* 输入区：Enter 发送，Shift+Enter 换行 */}
-      <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
-        <Input.TextArea
-          value={input}
-          autoSize={{ minRows: 1, maxRows: 4 }}
-          placeholder="描述你想对分镜做的修改…（Enter 发送，Shift+Enter 换行）"
-          disabled={chat.isPending}
-          onChange={(e) => setInput(e.target.value)}
-          onPressEnter={(e) => {
-            if (!e.shiftKey) {
-              e.preventDefault();
-              handleSend();
-            }
-          }}
-        />
-        <Button
-          type="primary"
-          icon={<SendOutlined />}
-          loading={chat.isPending}
-          disabled={input.trim() === ''}
-          onClick={handleSend}
-        >
-          发送
-        </Button>
-      </div>
     </div>
   );
 }

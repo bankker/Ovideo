@@ -1,0 +1,47 @@
+# 单机部署：Caddy(443, 自动 TLS + 口令闸) → server(8787)
+# SQLite 与媒体都落在命名卷上（真实磁盘，支持文件锁——这正是不能用 Cloud Run + GCS 卷的原因）
+services:
+  server:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: server
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: "file:/data/ovideo.db"
+      OVIDEO_SERVER_PORT: "8787"
+      # 出站代理（云上通常不需要，留空即可）
+      HTTP_PROXY: "${HTTP_PROXY:-}"
+      HTTPS_PROXY: "${HTTPS_PROXY:-}"
+      NO_PROXY: "localhost,127.0.0.1,::1,.local"
+    volumes:
+      - ovideo-db:/data                              # SQLite
+      - ovideo-storage:/app/apps/server/storage      # 生成的图/音/视频（STORAGE_ROOT）
+    expose:
+      - "8787"
+
+  caddy:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: web
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      OVIDEO_DOMAIN: "${OVIDEO_DOMAIN}"
+      OVIDEO_USER: "${OVIDEO_USER}"
+      OVIDEO_PASSWORD_HASH: "${OVIDEO_PASSWORD_HASH}"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data       # TLS 证书（务必持久化，否则重启会重新签发触发限流）
+      - caddy-config:/config
+    depends_on:
+      - server
+
+volumes:
+  ovideo-db:
+  ovideo-storage:
+  caddy-data:
+  caddy-config:

@@ -1,0 +1,31 @@
+# Caddy：自动 TLS + 口令闸 + 同源路由
+# 前端用相对路径 /api、/storage，所以 SPA 与后端同源即可，无需改任何应用代码。
+{$OVIDEO_DOMAIN} {
+	encode zstd gzip
+
+	# 口令闸：覆盖全站（含 /api 与 /storage 媒体）。
+	# 用户名 = OVIDEO_USER，密码哈希 = OVIDEO_PASSWORD_HASH（bcrypt，由 `caddy hash-password` 生成）
+	basic_auth {
+		{$OVIDEO_USER} {$OVIDEO_PASSWORD_HASH}
+	}
+
+	# 后端：API 与媒体
+	handle /api/* {
+		reverse_proxy server:8787
+	}
+	handle /storage/* {
+		reverse_proxy server:8787
+	}
+
+	# 前端：SPA，未命中的路径回退到 index.html（前端路由）
+	handle {
+		root * /srv
+		try_files {path} /index.html
+		file_server
+	}
+
+	# 视频合成是长任务，放宽超时
+	request_body {
+		max_size 512MB
+	}
+}

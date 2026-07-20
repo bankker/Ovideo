@@ -39,6 +39,38 @@ export function useGenerateScriptDraft(episodeId: string) {
   });
 }
 
+/** ---------- 对话改剧本正文（文稿 + 对话并置的写侧能力） ---------- */
+
+/** 改写结果：一句话摘要 + 改写后的完整正文（服务端不写库） */
+export interface RewriteScriptResult {
+  summary: string;
+  script: string;
+}
+
+export interface RewriteScriptInput {
+  draftId: string;
+  /** 用户的修改指令，1..1000 */
+  message: string;
+  /** 文本模型；不传走自动调度 */
+  modelConfigId?: string;
+}
+
+/**
+ * 对话改剧本：POST /api/script-drafts/:id/rewrite
+ * 刻意不做 invalidate——服务端只返回改写结果、不落库，
+ * 缓存要等用户在气泡里点「采纳」、走 useUpdateScriptDraft 之后才该变。
+ * 这样"模型说了什么"与"草稿变成了什么"始终是两件可分辨的事，撤销才有意义。
+ */
+export function useRewriteScript() {
+  return useMutation({
+    mutationFn: ({ draftId, message, modelConfigId }: RewriteScriptInput) =>
+      api<RewriteScriptResult>(`/script-drafts/${draftId}/rewrite`, {
+        method: 'POST',
+        body: { message, ...(modelConfigId !== undefined ? { modelConfigId } : {}) },
+      }),
+  });
+}
+
 /** 上传 .txt / .md 纯文本导入为剧本稿（multipart，字段名 file） */
 export function useImportScriptDraft(episodeId: string) {
   const qc = useQueryClient();

@@ -31,6 +31,7 @@ import { registerExecutor, getExecutor } from './modules/job/registry.js';
 import { createStoryboardGenerator } from './modules/script/generate.js';
 import { makeGenerateScript } from './modules/script/write.js';
 import { createScriptChat } from './modules/script/chat.js';
+import { makeRewriteScript } from './modules/script/rewrite.js';
 import { shotGroupRoutes } from './modules/shotgroup/routes.js';
 import { enhanceRoutes } from './modules/enhance/routes.js';
 import { registerEnhanceExecutors } from './modules/enhance/executors.js';
@@ -369,6 +370,23 @@ export async function buildApp(opts: BuildAppOptions = {}) {
           chatComplete(cfg, [{ role: 'user', content: prompt }], { jsonMode: true });
       }
       return createScriptChat({ textGen })(chatDb, params);
+    },
+    // 对话改剧本正文：模型路由策略与改分镜对话完全一致，只是产出的是整篇正文而非 patch
+    rewrite: async (params) => {
+      let textGen = chatTextGen;
+      if (params.modelConfigId) {
+        const model = await db.modelConfig.findUnique({
+          where: { id: params.modelConfigId },
+          include: { provider: true },
+        });
+        if (!model || !model.enabled || !model.provider.enabled || !model.provider.baseUrl) {
+          throw badRequest('指定的文本模型不可用（已停用/不存在/未配置端点）');
+        }
+        const cfg = { baseUrl: model.provider.baseUrl, apiKey: model.provider.apiKey, model: model.key };
+        textGen = async (prompt: string) =>
+          chatComplete(cfg, [{ role: 'user', content: prompt }], { jsonMode: true });
+      }
+      return makeRewriteScript({ textGen })(params);
     },
   });
   await app.register(storyboardRoutes, {

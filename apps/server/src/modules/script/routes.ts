@@ -29,6 +29,17 @@ export type ScriptChatFn = (
   input: { scriptDraftId: string; baseStoryboardId: string; message: string; modelConfigId?: string },
 ) => Promise<{ patch: StoryboardPatch; summary: string }>;
 
+/**
+ * 对话改剧本正文函数：与 rewrite.ts 的 makeRewriteScript 返回值结构兼容。
+ * 同 ScriptChatFn，放宽为函数签名而非 ReturnType 引用，避免 routes ↔ rewrite 循环依赖。
+ */
+export type ScriptRewriteFn = (input: {
+  script: string;
+  message: string;
+  stylePrompt?: string;
+  modelConfigId?: string;
+}) => Promise<{ summary: string; script: string }>;
+
 /** 一句话创意生成剧本的请求体 */
 const GenerateScriptBodySchema = z.object({
   brief: z.string().min(1).max(2000),
@@ -59,15 +70,23 @@ const ChatBodySchema = z.object({
   modelConfigId: z.string().optional(),
 });
 
+/** 对话改剧本正文的请求体（产出改写预览，用户采纳后才走 PATCH 落库） */
+const RewriteBodySchema = z.object({
+  message: z.string().min(1).max(1000),
+  /** 指定文本模型；缺省走按需调度 + 失效转移 */
+  modelConfigId: z.string().optional(),
+});
+
 export interface ScriptRoutesOptions {
   db: PrismaClient;
   enqueue: EnqueueFn;
   hooks?: ScriptHooks;
   chat?: ScriptChatFn;
+  rewrite?: ScriptRewriteFn;
 }
 
 export const scriptRoutes: FastifyPluginAsync<ScriptRoutesOptions> = async (app, opts) => {
-  const { db, enqueue, hooks, chat } = opts;
+  const { db, enqueue, hooks, chat, rewrite } = opts;
 
   app.get('/api/episodes/:id/script-drafts', async (req) => {
     const { id } = req.params as { id: string };
@@ -174,6 +193,31 @@ export const scriptRoutes: FastifyPluginAsync<ScriptRoutesOptions> = async (app,
       scriptDraftId: id,
       baseStoryboardId: body.baseStoryboardId,
       message: body.message,
+      modelConfigId: body.modelConfigId,
+    });
+  });
+
+  /**
+   * 对话改剧本正文：一句话指令 → 改写后的完整剧本（只返回，不落库）。
+   * 【为什么不写库】改写结果要先在对话气泡里给用户看、由用户点「采纳」才生效，
+   * 服务端擅自覆盖正文会让用户丢掉手写内容且无处可退（撤销由前端保存上一版文本承担）。
+   */
+  app.post('/api/script-drafts/:id/rewrite', async (req) => {
+    const { id } = req.params as { id: string };
+    const body = RewriteBodySchema.parse(req.body ?? {});
+    const draft = await db.scriptDraft.findUnique({
+      where: { id },
+      include: { episode: { include: { project: true } } },
+    });
+    if (!draft) throw notFound('剧本稿');
+    if (!draft.content.trim()) {
+      throw badRequest('该剧本稿还没有内容，请先生成或粘贴剧本再用对话修改');
+    }
+    if (!rewrite) throw new AppError(501, '对话改剧本功能未配置');
+    return rewrite({
+      script: draft.content,
+      message: body.message,
+      stylePrompt: draft.episode.project.stylePrompt,
       modelConfigId: body.modelConfigId,
     });
   });
