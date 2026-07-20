@@ -274,6 +274,27 @@ describe('onDubbingDurationChanged（§2.2 行5：|Δ|>500ms → video 标 stale
     expect(reasons[0]!.source).toBe('dubbing_duration_changed');
   });
 
+  it('所属场景的预计时长随之重算（场景时长 = 其下镜头时长之和）', async () => {
+    const { storyboard } = await seedBase();
+    const scene = await db.scene.create({
+      data: { storyboardId: storyboard.id, sortOrder: 0, title: '会议室', estimatedDurationMs: 9000 },
+    });
+    // 同一场景下两个镜头：一个待改，一个保持 4000 不动
+    const shot = await createShot(storyboard.id, 0, { durationLockedMs: 5000, sceneId: scene.id });
+    await createShot(storyboard.id, 1, { durationLockedMs: 4000, sceneId: scene.id });
+
+    await onDubbingDurationChanged(db, shot.id, 7000);
+
+    const after = await db.scene.findUniqueOrThrow({ where: { id: scene.id } });
+    expect(after.estimatedDurationMs).toBe(11000); // 7000 + 4000
+  });
+
+  it('镜头未归属场景（存量数据）→ 重算是空操作，不报错', async () => {
+    const { storyboard } = await seedBase();
+    const shot = await createShot(storyboard.id, 0, { durationLockedMs: 5000 });
+    await expect(onDubbingDurationChanged(db, shot.id, 6000)).resolves.toBeUndefined();
+  });
+
   it('偏差恰为 500ms（阈值边界）→ 只更新时长，不标 stale、不追加原因', async () => {
     const { storyboard } = await seedBase();
     const shot = await createShot(storyboard.id, 0, { durationLockedMs: 10000 });

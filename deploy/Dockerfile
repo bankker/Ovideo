@@ -5,6 +5,11 @@
 
 # ---------- builder ----------
 FROM node:24-slim AS builder
+# openssl 必须在 `prisma generate` 之前装好：否则 Prisma 探测不到 libssl，
+# 会按 debian-openssl-1.1.x 生成查询引擎，而运行阶段需要 3.0.x → 启动即崩。
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends openssl ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
 RUN corepack enable
 WORKDIR /app
 

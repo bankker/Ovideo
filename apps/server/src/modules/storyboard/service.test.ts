@@ -615,3 +615,286 @@ describe('applyPatch：跨版本镜头身份 lineageId', () => {
     expect(legacyAfter.lineageId).toBe(legacyShot.id);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Scene（场景）：一场戏下挂多个镜头。sceneRef 是可选的，缺省时必须完全保持旧行为。
+// ---------------------------------------------------------------------------
+
+function sceneRef(key: string, sortOrder: number, extra: Record<string, string> = {}) {
+  return { sceneKey: key, sortOrder, title: `场景${key}`, ...extra };
+}
+
+async function loadScenes(storyboardId: string) {
+  return tdb.db.scene.findMany({ where: { storyboardId }, orderBy: { sortOrder: 'asc' } });
+}
+
+describe('applyPatch：Scene 归属', () => {
+  it('同一 sceneKey 的多个镜头归入同一条 Scene（一场戏拆多镜的核心诉求）', async () => {
+    const { ep, dr } = await freshEpisode();
+    const v1 = await apply({
+      episodeId: ep.id,
+      scriptDraftId: dr.id,
+      patch: [
+        { op: 'add_shot', shot: makeShot('中景交代', { sceneRef: sceneRef('s1', 0) }) },
+        { op: 'add_shot', shot: makeShot('正反打', { sceneRef: sceneRef('s1', 0) }) },
+        { op: 'add_shot', shot: makeShot('特写反应', { sceneRef: sceneRef('s1', 0) }) },
+      ],
+    });
+
+    const scenes = await loadScenes(v1.storyboard.id);
+    const shots = await loadShots(v1.storyboard.id);
+    expect(scenes).toHaveLength(1);
+    expect(shots).toHaveLength(3);
+    expect(new Set(shots.map((s) => s.sceneId))).toEqual(new Set([scenes[0].id]));
+    // 新场景以自身 id 开锚，规则同 Shot.lineageId
+    expect(scenes[0].lineageId).toBe(scenes[0].id);
+  });
+
+  it('不同 sceneKey 建出各自的 Scene，字段按 sceneRef 落库', async () => {
+    const { ep, dr } = await freshEpisode();
+    const v1 = await apply({
+      episodeId: ep.id,
+      scriptDraftId: dr.id,
+      patch: [
+        {
+          op: 'add_shot',
+          shot: makeShot('会议室全景', {
+            sceneRef: {
+              sceneKey: 'a',
+              sortOrder: 0,
+              title: '客户会议室',
+              location: '客户会议室',
+              interiorExterior: 'INT',
+              timeOfDay: '白天',
+              sourceText: '场景一：客户会议室，白天。',
+            },
+          }),
+        },
+        { op: 'add_shot', shot: makeShot('天台', { sceneRef: sceneRef('b', 1) }) },
+      ],
+    });
+
+    const scenes = await loadScenes(v1.storyboard.id);
+    expect(scenes).toHaveLength(2);
+    expect(scenes[0]).toMatchObject({
+      sortOrder: 0,
+      title: '客户会议室',
+      location: '客户会议室',
+      interiorExterior: 'INT',
+      timeOfDay: '白天',
+      sourceText: '场景一：客户会议室，白天。',
+      status: 'DRAFT',
+    });
+    expect(scenes[1].sortOrder).toBe(1);
+
+    const shots = await loadShots(v1.storyboard.id);
+    expect(shots[0].sceneId).toBe(scenes[0].id);
+    expect(shots[1].sceneId).toBe(scenes[1].id);
+  });
+
+  it('不传 sceneRef 时 sceneId 为 null（兼容对话改分镜等既有调用方）', async () => {
+    const { ep, dr } = await freshEpisode();
+    const v1 = await apply({
+      episodeId: ep.id,
+      scriptDraftId: dr.id,
+      patch: [{ op: 'add_shot', shot: makeShot('无场景镜头') }],
+    });
+    const shots = await loadShots(v1.storyboard.id);
+    expect(shots[0].sceneId).toBeNull();
+    expect(await loadScenes(v1.storyboard.id)).toHaveLength(0);
+  });
+
+  it('estimatedDurationMs = 场景下镜头时长之和（锁定时长优先）', async () => {
+    const { ep, dr } = await freshEpisode();
+    const v1 = await apply({
+      episodeId: ep.id,
+      scriptDraftId: dr.id,
+      patch: [
+        {
+          op: 'add_shot',
+          shot: makeShot('一', { sceneRef: sceneRef('s', 0), durationPlannedMs: 5000 }),
+        },
+        {
+          op: 'add_shot',
+          shot: makeShot('二', { sceneRef: sceneRef('s', 0), durationPlannedMs: 8000 }),
+        },
+      ],
+    });
+    const [scene] = await loadScenes(v1.storyboard.id);
+    expect(scene.estimatedDurationMs).toBe(13000);
+
+    // 给其中一镜锁定时长（配音定长），复制到 v2 后场景时长按锁定值重算
+    const shots = await loadShots(v1.storyboard.id);
+    await tdb.db.shot.update({ where: { id: shots[0].id }, data: { durationLockedMs: 3000 } });
+
+    const v2 = await apply({
+      episodeId: ep.id,
+      scriptDraftId: dr.id,
+      baseStoryboardId: v1.storyboard.id,
+      patch: [],
+    });
+    const [scene2] = await loadScenes(v2.storyboard.id);
+    expect(scene2.estimatedDurationMs).toBe(11000);
+  });
+
+  it('版本复制：Scene 被复制到新版本、lineageId 继承、镜头改指新 Scene（一场多镜完整往返）', async () => {
+    const { ep, dr } = await freshEpisode();
+    const v1 = await apply({
+      episodeId: ep.id,
+      scriptDraftId: dr.id,
+      patch: [
+        { op: 'add_shot', shot: makeShot('A1', { sceneRef: sceneRef('s1', 0) }) },
+        { op: 'add_shot', shot: makeShot('A2', { sceneRef: sceneRef('s1', 0) }) },
+        { op: 'add_shot', shot: makeShot('B1', { sceneRef: sceneRef('s2', 1) }) },
+      ],
+    });
+    const v1Scenes = await loadScenes(v1.storyboard.id);
+    const v1Shots = await loadShots(v1.storyboard.id);
+    expect(v1Scenes).toHaveLength(2);
+
+    const v2 = await apply({
+      episodeId: ep.id,
+      scriptDraftId: dr.id,
+      baseStoryboardId: v1.storyboard.id,
+      patch: [{ op: 'update_shot', shotId: v1Shots[0].id, fields: { imagePrompt: '改过的提示词' } }],
+    });
+    const v2Scenes = await loadScenes(v2.storyboard.id);
+    const v2Shots = await loadShots(v2.storyboard.id);
+
+    // 每条基底 Scene 只复制一次（不是每个镜头复制一次）
+    expect(v2Scenes).toHaveLength(2);
+    const v1SceneIds = new Set(v1Scenes.map((s) => s.id));
+    for (const s of v2Scenes) {
+      expect(v1SceneIds.has(s.id)).toBe(false);
+      // 新 Scene 归属新版本，绝不能让新镜头指回旧版本的场景行
+      expect(s.storyboardId).toBe(v2.storyboard.id);
+    }
+    expect(v2Scenes[0].lineageId).toBe(v1Scenes[0].id);
+    expect(v2Scenes[1].lineageId).toBe(v1Scenes[1].id);
+    // 同场景的两个镜头共用同一条新 Scene
+    expect(v2Shots[0].sceneId).toBe(v2Scenes[0].id);
+    expect(v2Shots[1].sceneId).toBe(v2Scenes[0].id);
+    expect(v2Shots[2].sceneId).toBe(v2Scenes[1].id);
+    // 场景字段原样带过来
+    expect(v2Scenes[0].title).toBe(v1Scenes[0].title);
+    // 旧版本原样保留，可回滚
+    const v1After = await loadShots(v1.storyboard.id);
+    expect(v1After.map((s) => s.sceneId)).toEqual(v1Shots.map((s) => s.sceneId));
+
+    // 第三代仍接在同一条 lineage 上（lineageId 是锚点，不是"上一代 id"）
+    const v3 = await apply({
+      episodeId: ep.id,
+      scriptDraftId: dr.id,
+      baseStoryboardId: v2.storyboard.id,
+      patch: [],
+    });
+    const v3Scenes = await loadScenes(v3.storyboard.id);
+    expect(v3Scenes[0].lineageId).toBe(v1Scenes[0].id);
+  });
+
+  it('存量 Scene（lineageId 为 null）在复制时与新行一起开锚', async () => {
+    const { ep, dr } = await freshEpisode();
+    const legacySb = await tdb.db.storyboard.create({
+      data: { episodeId: ep.id, scriptDraftId: dr.id, version: 1 },
+    });
+    const legacyScene = await tdb.db.scene.create({
+      data: { storyboardId: legacySb.id, sortOrder: 0, title: '存量场景' },
+    });
+    await tdb.db.shot.create({
+      data: { storyboardId: legacySb.id, sortOrder: 0, sceneId: legacyScene.id, sourceText: '镜头' },
+    });
+    expect(legacyScene.lineageId).toBeNull();
+
+    const v2 = await apply({
+      episodeId: ep.id,
+      scriptDraftId: dr.id,
+      baseStoryboardId: legacySb.id,
+      patch: [],
+    });
+    const [copied] = await loadScenes(v2.storyboard.id);
+    const legacyAfter = await tdb.db.scene.findUniqueOrThrow({ where: { id: legacyScene.id } });
+
+    expect(copied.lineageId).toBe(legacyScene.id);
+    expect(legacyAfter.lineageId).toBe(legacyScene.id);
+  });
+
+  it('remove_shot 移走场景内一个镜头后，场景时长按剩余镜头重算', async () => {
+    const { ep, dr } = await freshEpisode();
+    const v1 = await apply({
+      episodeId: ep.id,
+      scriptDraftId: dr.id,
+      patch: [
+        {
+          op: 'add_shot',
+          shot: makeShot('一', { sceneRef: sceneRef('s', 0), durationPlannedMs: 5000 }),
+        },
+        {
+          op: 'add_shot',
+          shot: makeShot('二', { sceneRef: sceneRef('s', 0), durationPlannedMs: 8000 }),
+        },
+      ],
+    });
+    const v1Shots = await loadShots(v1.storyboard.id);
+
+    const v2 = await apply({
+      episodeId: ep.id,
+      scriptDraftId: dr.id,
+      baseStoryboardId: v1.storyboard.id,
+      patch: [{ op: 'remove_shot', shotId: v1Shots[1].id }],
+    });
+    const [scene2] = await loadScenes(v2.storyboard.id);
+    expect(scene2.estimatedDurationMs).toBe(5000);
+  });
+
+  it('影视语义五字段：新增落库、复制继承、update_shot 覆盖', async () => {
+    const { ep, dr } = await freshEpisode();
+    const v1 = await apply({
+      episodeId: ep.id,
+      scriptDraftId: dr.id,
+      patch: [
+        {
+          op: 'add_shot',
+          shot: makeShot('特写', {
+            shotSize: '特写',
+            cameraAngle: '仰拍',
+            cameraMovement: '推',
+            composition: '主体居中，浅景深',
+            transition: '叠化',
+          }),
+        },
+        { op: 'add_shot', shot: makeShot('缺省镜头') },
+      ],
+    });
+    const v1Shots = await loadShots(v1.storyboard.id);
+    expect(v1Shots[0]).toMatchObject({
+      shotSize: '特写',
+      cameraAngle: '仰拍',
+      cameraMovement: '推',
+      composition: '主体居中，浅景深',
+      transition: '叠化',
+    });
+    // 缺省一律空串，不是 null
+    expect(v1Shots[1]).toMatchObject({
+      shotSize: '',
+      cameraAngle: '',
+      cameraMovement: '',
+      composition: '',
+      transition: '',
+    });
+
+    const v2 = await apply({
+      episodeId: ep.id,
+      scriptDraftId: dr.id,
+      baseStoryboardId: v1.storyboard.id,
+      patch: [{ op: 'update_shot', shotId: v1Shots[0].id, fields: { shotSize: '中景' } }],
+    });
+    const v2Shots = await loadShots(v2.storyboard.id);
+    // 覆盖的只有 shotSize，其余原样继承
+    expect(v2Shots[0]).toMatchObject({
+      shotSize: '中景',
+      cameraAngle: '仰拍',
+      cameraMovement: '推',
+      transition: '叠化',
+    });
+  });
+});

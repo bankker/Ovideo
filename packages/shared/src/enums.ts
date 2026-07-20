@@ -55,6 +55,10 @@ export type DubbingStatus = z.infer<typeof DubbingStatusSchema>;
 export const CutStatusSchema = z.enum(['DRAFT', 'COMPOSING', 'READY', 'FAILED']);
 export type CutStatus = z.infer<typeof CutStatusSchema>;
 
+/** 场景状态：未检查 / 存在问题 / 已确认 / 已拆镜（Scene.status 的合法值） */
+export const SceneStatusSchema = z.enum(['DRAFT', 'NEEDS_REVIEW', 'CONFIRMED', 'SHOT_PLANNED']);
+export type SceneStatus = z.infer<typeof SceneStatusSchema>;
+
 /** 失效原因条目（写入 Shot.staleReasonsJson / Storyboard.staleReasonsJson，追加式） */
 export const StaleReasonSchema = z.object({
   source: z.string(),

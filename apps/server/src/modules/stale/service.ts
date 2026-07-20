@@ -154,6 +154,26 @@ export async function onDubbingDurationChanged(
     );
   }
   await db.shot.update({ where: { id: shotId }, data });
+  // 场景时长的定义是"其下镜头时长之和"。配音锁定时长后若不重算，
+  // 场景时长会一直停在出版本时的估算值，直到下次出新版本才被纠正。
+  await recalcSceneDuration(db, shot.sceneId);
+}
+
+/**
+ * 按"其下镜头时长之和"重算场景预计时长（锁定时长优先，与时长链同口径）。
+ * sceneId 为空（存量镜头/未归属场景）时空操作。
+ */
+export async function recalcSceneDuration(
+  db: PrismaClient,
+  sceneId: string | null,
+): Promise<void> {
+  if (!sceneId) return;
+  const shots = await db.shot.findMany({
+    where: { sceneId },
+    select: { durationPlannedMs: true, durationLockedMs: true },
+  });
+  const total = shots.reduce((sum, s) => sum + (s.durationLockedMs ?? s.durationPlannedMs), 0);
+  await db.scene.update({ where: { id: sceneId }, data: { estimatedDurationMs: total } });
 }
 
 /**

@@ -25,10 +25,46 @@ export interface SplitShotResult {
 }
 
 type BaseShot = Prisma.ShotGetPayload<{
-  include: { tags: true; dialogue: true; takes: true };
+  include: { tags: true; dialogue: true; takes: true; scene: true };
 }>;
 
 type Tx = Prisma.TransactionClient;
+
+/**
+ * 把基底版本的 Scene 复制到新版本（同一条基底 Scene 只复制一次），返回新 Scene id。
+ * 规则与 storyboard/service.copyScene 完全一致——两处若不一致，
+ * 拆分出的版本会成为 lineage 断点（此前 Shot.lineageId 就踩过同样的坑）。
+ * base.scene 为 null（存量镜头未归属场景）时返回 null，不凭空造场景。
+ */
+async function copySceneOf(
+  tx: Tx,
+  storyboardId: string,
+  base: BaseShot,
+  cache: Map<string, string>,
+): Promise<string | null> {
+  const scene = base.scene;
+  if (!scene) return null;
+  const cached = cache.get(scene.id);
+  if (cached) return cached;
+  const created = await tx.scene.create({
+    data: {
+      storyboardId,
+      sortOrder: scene.sortOrder,
+      title: scene.title,
+      location: scene.location,
+      interiorExterior: scene.interiorExterior,
+      timeOfDay: scene.timeOfDay,
+      sourceText: scene.sourceText,
+      status: scene.status,
+      lineageId: scene.lineageId ?? scene.id,
+    },
+  });
+  if (!scene.lineageId) {
+    await tx.scene.update({ where: { id: scene.id }, data: { lineageId: scene.id } });
+  }
+  cache.set(scene.id, created.id);
+  return created.id;
+}
 
 /** 总时长均分为 n 段（最后一段拿余数），保证 sum(parts) === totalMs */
 function splitDuration(totalMs: number, n: number): number[] {
@@ -79,23 +115,36 @@ async function copyShotBindings(
 /** 非目标镜头的原样复制（同 applyPatch 的 copy 规则） */
 async function copyShotAsIs(
   tx: Tx,
-  opts: { storyboardId: string; episodeId: string; base: BaseShot; sortOrder: number },
+  opts: {
+    storyboardId: string;
+    episodeId: string;
+    base: BaseShot;
+    sortOrder: number;
+    sceneCache: Map<string, string>;
+  },
 ): Promise<void> {
-  const { storyboardId, episodeId, base, sortOrder } = opts;
+  const { storyboardId, episodeId, base, sortOrder, sceneCache } = opts;
   // 与 applyPatch 同规则继承 lineage；漏写会让拆分版本成为断点，跨版本抽卡历史在此断链
   if (base.lineageId === null) {
     await tx.shot.update({ where: { id: base.id }, data: { lineageId: base.id } });
   }
+  const sceneId = await copySceneOf(tx, storyboardId, base, sceneCache);
   const created = await tx.shot.create({
     data: {
       storyboardId,
       sortOrder,
+      sceneId,
       lineageId: base.lineageId ?? base.id,
       sourceText: base.sourceText,
       imagePrompt: base.imagePrompt,
       videoPrompt: base.videoPrompt,
       durationPlannedMs: base.durationPlannedMs,
       durationLockedMs: base.durationLockedMs,
+      shotSize: base.shotSize,
+      cameraAngle: base.cameraAngle,
+      cameraMovement: base.cameraMovement,
+      composition: base.composition,
+      transition: base.transition,
       groupId: base.groupId,
       groupIndex: base.groupIndex,
       keyframeStale: base.keyframeStale,
@@ -155,7 +204,12 @@ export async function splitShotIntoGroup(
         include: {
           shots: {
             orderBy: { sortOrder: 'asc' },
-            include: { tags: true, dialogue: { orderBy: { sortOrder: 'asc' } }, takes: true },
+            include: {
+              tags: true,
+              dialogue: { orderBy: { sortOrder: 'asc' } },
+              takes: true,
+              scene: true,
+            },
           },
         },
       });
@@ -166,10 +220,29 @@ export async function splitShotIntoGroup(
       });
 
       const groupShotIds: string[] = [];
+      /** 基底 Scene id → 新版本 Scene id，保证同一条场景只复制一次 */
+      const sceneCache = new Map<string, string>();
+      /** 新 Scene id → 其下镜头时长之和 */
+      const sceneDurationMs = new Map<string, number>();
+      const noteSceneDuration = (sceneId: string | null, durationMs: number) => {
+        if (!sceneId) return;
+        sceneDurationMs.set(sceneId, (sceneDurationMs.get(sceneId) ?? 0) + durationMs);
+      };
+
       let sortOrder = 0;
       for (const shot of base.shots) {
         if (shot.id !== target.id) {
-          await copyShotAsIs(tx, { storyboardId: storyboard.id, episodeId, base: shot, sortOrder });
+          await copyShotAsIs(tx, {
+            storyboardId: storyboard.id,
+            episodeId,
+            base: shot,
+            sortOrder,
+            sceneCache,
+          });
+          noteSceneDuration(
+            sceneCache.get(shot.sceneId ?? '') ?? null,
+            shot.durationLockedMs ?? shot.durationPlannedMs,
+          );
           sortOrder += 1;
           continue;
         }
@@ -179,6 +252,9 @@ export async function splitShotIntoGroup(
           await tx.shot.update({ where: { id: shot.id }, data: { lineageId: shot.id } });
         }
 
+        // 拆的是镜头不是场景：N 个分段全部挂在同一条（复制出来的）Scene 上
+        const targetSceneId = await copySceneOf(tx, storyboard.id, shot, sceneCache);
+
         // 目标镜头 → N 个分段（groupId = 原 shotId，天然全局唯一）
         for (let i = 0; i < n; i += 1) {
           const suffix = `（第${i + 1}段/共${n}段）`;
@@ -186,12 +262,19 @@ export async function splitShotIntoGroup(
             data: {
               storyboardId: storyboard.id,
               sortOrder,
+              sceneId: targetSceneId,
               // 段 0 继承原镜头 lineage（连着它的抽卡历史）；段 1..N-1 是全新镜头，建后各自开锚
               lineageId: i === 0 ? (shot.lineageId ?? shot.id) : null,
               sourceText: shot.sourceText ? shot.sourceText + suffix : '',
               imagePrompt: shot.imagePrompt ? shot.imagePrompt + suffix : '',
               videoPrompt: shot.videoPrompt ? shot.videoPrompt + suffix : '',
               durationPlannedMs: parts[i]!,
+              // 影视语义每段照抄：拆的是时长，景别/角度/运镜不变
+              shotSize: shot.shotSize,
+              cameraAngle: shot.cameraAngle,
+              cameraMovement: shot.cameraMovement,
+              composition: shot.composition,
+              transition: shot.transition,
               // 原镜头已锁定时长的，各段同样按均分值锁定；未锁定的保持未锁定
               durationLockedMs: shot.durationLockedMs != null ? parts[i]! : null,
               groupId: shot.id,
@@ -217,9 +300,16 @@ export async function splitShotIntoGroup(
           if (i === 0) await copyTakes(tx, shot, created.id);
           else await tx.shot.update({ where: { id: created.id }, data: { lineageId: created.id } });
           await copyShotBindings(tx, episodeId, shot.id, created.id);
+          // 各段时长之和 = 原镜头总时长，故场景时长不因拆分而改变
+          noteSceneDuration(targetSceneId, parts[i]!);
           groupShotIds.push(created.id);
           sortOrder += 1;
         }
+      }
+
+      // 场景时长 = 其下镜头时长之和，等镜头全部落库后统一写入
+      for (const [sceneId, durationMs] of sceneDurationMs) {
+        await tx.scene.update({ where: { id: sceneId }, data: { estimatedDurationMs: durationMs } });
       }
 
       return { storyboard, groupShotIds };

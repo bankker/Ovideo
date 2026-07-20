@@ -38,7 +38,9 @@ export type ScriptRewriteFn = (input: {
   message: string;
   stylePrompt?: string;
   modelConfigId?: string;
-}) => Promise<{ summary: string; script: string }>;
+  /** 传了就是选区改写：只改这一段，产出 replacement；不传是整篇改写，产出 script */
+  selection?: { from: number; to: number };
+}) => Promise<{ summary: string; script?: string; replacement?: string }>;
 
 /** 一句话创意生成剧本的请求体 */
 const GenerateScriptBodySchema = z.object({
@@ -75,6 +77,12 @@ const RewriteBodySchema = z.object({
   message: z.string().min(1).max(1000),
   /** 指定文本模型；缺省走按需调度 + 失效转移 */
   modelConfigId: z.string().optional(),
+  /**
+   * 选区改写：正文中的字符区间（UTF-16 code unit 下标，含 from 不含 to）。
+   * 这里只校验"是整数"，越界与空选区留给处理函数报中文错——
+   * zod 的边界报错是英文结构化信息，用户看不懂该怎么办。
+   */
+  selection: z.object({ from: z.number().int(), to: z.number().int() }).optional(),
 });
 
 export interface ScriptRoutesOptions {
@@ -198,9 +206,15 @@ export const scriptRoutes: FastifyPluginAsync<ScriptRoutesOptions> = async (app,
   });
 
   /**
-   * 对话改剧本正文：一句话指令 → 改写后的完整剧本（只返回，不落库）。
+   * 对话改剧本正文：一句话指令 → 改写结果（只返回，不落库）。
    * 【为什么不写库】改写结果要先在对话气泡里给用户看、由用户点「采纳」才生效，
    * 服务端擅自覆盖正文会让用户丢掉手写内容且无处可退（撤销由前端保存上一版文本承担）。
+   *
+   * 两种模式：
+   * - 不传 selection → 整篇改写，返回 { summary, script }（原有行为，一字未改）；
+   * - 传 selection   → 只改这一段，返回 { summary, replacement, from, to }。
+   * 【为什么要回显 from/to】前端拿到结果时用户可能已经在编辑器里挪过光标，
+   * 回显的区间才是这次改写真正对应的位置，拼接时以它为准就不会拼错地方。
    */
   app.post('/api/script-drafts/:id/rewrite', async (req) => {
     const { id } = req.params as { id: string };
@@ -213,12 +227,36 @@ export const scriptRoutes: FastifyPluginAsync<ScriptRoutesOptions> = async (app,
     if (!draft.content.trim()) {
       throw badRequest('该剧本稿还没有内容，请先生成或粘贴剧本再用对话修改');
     }
+
+    const { selection } = body;
+    if (selection) {
+      // 越界通常意味着前端拿的是旧正文（别处刚改过），让用户重选比拼一段错位文本安全
+      if (selection.from < 0 || selection.to > draft.content.length || selection.from >= selection.to) {
+        throw badRequest('选区超出剧本范围，请重新选择');
+      }
+      if (!draft.content.slice(selection.from, selection.to).trim()) {
+        throw badRequest('选中的内容为空，请选择要修改的段落');
+      }
+    }
+
     if (!rewrite) throw new AppError(501, '对话改剧本功能未配置');
-    return rewrite({
+    const result = await rewrite({
       script: draft.content,
       message: body.message,
       stylePrompt: draft.episode.project.stylePrompt,
       modelConfigId: body.modelConfigId,
+      selection,
     });
+
+    if (!selection) return { summary: result.summary, script: result.script };
+    // 走到这里 replacement 必定有值（makeRewriteScript 缺字段时已抛 400），
+    // 这层判断只是兜住"注入了别的实现"的情况，不做静默降级
+    if (!result.replacement) throw badRequest('AI 返回的改写结果无法解析，请换个说法重试');
+    return {
+      summary: result.summary,
+      replacement: result.replacement,
+      from: selection.from,
+      to: selection.to,
+    };
   });
 };

@@ -134,8 +134,35 @@ model Storyboard {
   staleReasonsJson String      @default("[]")
   createdAt        DateTime    @default(now())
   shots            Shot[]
+  scenes           Scene[]
 
   @@unique([episodeId, version])
+}
+
+// 场景（戏）：剧本的叙事单元，一个场景下挂多个镜头。
+// 引入原因：此前 Storyboard 直连 Shot，"一场戏"被直接产出成"一个镜头"，
+// 导致 18s 的会议室戏只有一个镜头——既不符合影视语言（应拆成中景交代→正反打→特写反应），
+// 单镜时长也远超视频模型 5s/10s 的档位。
+model Scene {
+  id                  String     @id @default(cuid())
+  storyboardId        String
+  storyboard          Storyboard @relation(fields: [storyboardId], references: [id], onDelete: Cascade)
+  sortOrder           Int // 0-based，展示为 S01/S02
+  title               String     @default("") // 场景名，如"客户会议室"
+  location            String     @default("") // 地点（多数情况与 title 同源）
+  interiorExterior    String     @default("") // "INT" | "EXT" | ""（未识别）
+  timeOfDay           String     @default("") // "白天" | "傍晚" | "深夜" | ""
+  sourceText          String     @default("") // 该场景对应的剧本原文片段
+  estimatedDurationMs Int        @default(0) // 场景预计时长 = 其下镜头时长之和
+  status              String     @default("DRAFT") // SceneStatus
+  // 跨版本身份，语义同 Shot.lineageId：版本复制时继承，用于把同一逻辑场景在各版本间关联。
+  // 没有它，改一次分镜就会让"同一场戏"在新旧版本间失去对应关系。
+  lineageId           String?
+  createdAt           DateTime   @default(now())
+  shots               Shot[]
+
+  @@index([storyboardId])
+  @@index([lineageId])
 }
 
 model Shot {
@@ -143,9 +170,19 @@ model Shot {
   storyboardId           String
   storyboard             Storyboard @relation(fields: [storyboardId], references: [id], onDelete: Cascade)
   sortOrder              Int
+  // 所属场景。可空：Scene 引入前的存量镜头为 null，且"对话改分镜"等既有调用方不产出场景信息，
+  // 代码一律不得假设它非空（回填脚本负责补齐存量）。
+  sceneId                String?
+  scene                  Scene?  @relation(fields: [sceneId], references: [id], onDelete: SetNull)
   sourceText             String  @default("")
   imagePrompt            String  @default("")
   videoPrompt            String  @default("")
+  // ---- 影视语义（本阶段只落库，供后续镜头检查器 UI 使用；缺省空串 = 未指定）----
+  shotSize               String  @default("") // 景别：远景/全景/中景/近景/特写
+  cameraAngle            String  @default("") // 角度：平视/俯拍/仰拍/过肩
+  cameraMovement         String  @default("") // 运镜：固定/推/拉/摇/跟
+  composition            String  @default("") // 构图描述
+  transition             String  @default("") // 转场：切/叠化/淡入淡出
   durationPlannedMs      Int     @default(12000)
   durationLockedMs       Int?
   groupId                String? // ShotGroup（M3 衔接组）
@@ -168,6 +205,7 @@ model Shot {
   bindings     Binding[]
 
   @@index([lineageId])
+  @@index([sceneId])
 }
 
 model ShotTag {

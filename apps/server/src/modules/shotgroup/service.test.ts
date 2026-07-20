@@ -501,3 +501,125 @@ describe('onTakeSelected VIDEO 组内传播', () => {
     expect(reasons[0]!.source).toBe('take_selected');
   });
 });
+
+// 拆分的是镜头，不是场景：拆完 N 段仍是同一场戏。
+// 复制规则必须与 storyboard/service.applyPatch 完全一致，否则拆分版本会成为
+// Scene 的 lineage 断点（Shot.lineageId 此前就踩过同样的坑）。
+describe('splitShotIntoGroup：Scene 承载', () => {
+  it('分段与同场景旁观镜头共用同一条复制出来的 Scene，lineageId 继承，场景时长不变', async () => {
+    const { storyboard } = await seedStoryboard();
+    const scene = await db.scene.create({
+      data: {
+        storyboardId: storyboard.id,
+        sortOrder: 0,
+        title: '客户会议室',
+        location: '客户会议室',
+        interiorExterior: 'INT',
+        timeOfDay: '白天',
+        estimatedDurationMs: 44000,
+      },
+    });
+    await db.scene.update({ where: { id: scene.id }, data: { lineageId: scene.id } });
+
+    const target = await db.shot.create({
+      data: {
+        storyboardId: storyboard.id,
+        sortOrder: 0,
+        sceneId: scene.id,
+        sourceText: '会议室长镜头',
+        durationPlannedMs: 32000,
+        shotSize: '中景',
+        cameraMovement: '跟',
+      },
+    });
+    const sameScene = await db.shot.create({
+      data: {
+        storyboardId: storyboard.id,
+        sortOrder: 1,
+        sceneId: scene.id,
+        sourceText: '同场景反应镜头',
+        durationPlannedMs: 12000,
+      },
+    });
+
+    const { storyboard: v2 } = await splitShotIntoGroup(db, {
+      shotId: target.id,
+      maxSegmentMs: 15000,
+    });
+
+    const newScenes = await db.scene.findMany({ where: { storyboardId: v2.id } });
+    const newShots = await newShotsOf(v2.id);
+
+    // 同一条基底场景只复制一次（不是每个分段复制一次）
+    expect(newScenes).toHaveLength(1);
+    const copied = newScenes[0]!;
+    expect(copied.id).not.toBe(scene.id);
+    expect(copied.lineageId).toBe(scene.id);
+    expect(copied).toMatchObject({
+      title: '客户会议室',
+      location: '客户会议室',
+      interiorExterior: 'INT',
+      timeOfDay: '白天',
+    });
+
+    // 32000/15000 → 3 段；3 段 + 旁观镜头全部挂在这条新场景上
+    expect(newShots).toHaveLength(4);
+    for (const s of newShots) expect(s.sceneId).toBe(copied.id);
+    expect(newShots.filter((s) => s.groupId === target.id)).toHaveLength(3);
+
+    // 各段时长之和 = 原镜头总时长，故场景总时长不因拆分而改变
+    expect(copied.estimatedDurationMs).toBe(32000 + 12000);
+
+    // 影视语义每段照抄（拆的是时长，景别/运镜不变）
+    for (const s of newShots.filter((x) => x.groupId === target.id)) {
+      expect(s.shotSize).toBe('中景');
+      expect(s.cameraMovement).toBe('跟');
+    }
+
+    // 旧版本原样保留，可回滚
+    const oldShots = await newShotsOf(storyboard.id);
+    expect(oldShots.map((s) => s.id)).toEqual([target.id, sameScene.id]);
+    expect(oldShots.map((s) => s.sceneId)).toEqual([scene.id, scene.id]);
+  });
+
+  it('存量 Scene（lineageId 为 null）在拆分复制时与新行一起开锚', async () => {
+    const { storyboard } = await seedStoryboard();
+    const scene = await db.scene.create({
+      data: { storyboardId: storyboard.id, sortOrder: 0, title: '存量场景' },
+    });
+    expect(scene.lineageId).toBeNull();
+    const target = await db.shot.create({
+      data: {
+        storyboardId: storyboard.id,
+        sortOrder: 0,
+        sceneId: scene.id,
+        durationPlannedMs: 32000,
+      },
+    });
+
+    const { storyboard: v2 } = await splitShotIntoGroup(db, {
+      shotId: target.id,
+      maxSegmentMs: 15000,
+    });
+
+    const [copied] = await db.scene.findMany({ where: { storyboardId: v2.id } });
+    const legacyAfter = await db.scene.findUniqueOrThrow({ where: { id: scene.id } });
+    expect(copied!.lineageId).toBe(scene.id);
+    expect(legacyAfter.lineageId).toBe(scene.id);
+  });
+
+  it('未归属场景的存量镜头拆分后 sceneId 仍为 null（不凭空造场景）', async () => {
+    const { storyboard } = await seedStoryboard();
+    const target = await db.shot.create({
+      data: { storyboardId: storyboard.id, sortOrder: 0, durationPlannedMs: 32000 },
+    });
+
+    const { storyboard: v2 } = await splitShotIntoGroup(db, {
+      shotId: target.id,
+      maxSegmentMs: 15000,
+    });
+
+    expect(await db.scene.findMany({ where: { storyboardId: v2.id } })).toHaveLength(0);
+    for (const s of await newShotsOf(v2.id)) expect(s.sceneId).toBeNull();
+  });
+});

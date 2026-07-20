@@ -30,9 +30,9 @@ services:
       - "80:80"
       - "443:443"
     environment:
+      # 只注入域名。用户名与 bcrypt 哈希由部署时写进 Caddyfile——
+      # bcrypt 里的 $ 会和 compose 的变量插值打架，放 env 反而更脆。
       OVIDEO_DOMAIN: "${OVIDEO_DOMAIN}"
-      OVIDEO_USER: "${OVIDEO_USER}"
-      OVIDEO_PASSWORD_HASH: "${OVIDEO_PASSWORD_HASH}"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data       # TLS 证书（务必持久化，否则重启会重新签发触发限流）

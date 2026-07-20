@@ -5,9 +5,12 @@ import { createTestDb, type TestDb } from '../../test/testdb.js';
 import { registerErrorHandler } from '../../lib/errors.js';
 import {
   buildRewritePrompt,
+  buildSelectionRewritePrompt,
   makeRewriteScript,
   REWRITE_MESSAGE_BEGIN,
   REWRITE_SCRIPT_BEGIN,
+  SELECTION_BEGIN,
+  SELECTION_END,
 } from './rewrite.js';
 import { scriptRoutes, type ScriptRewriteFn } from './routes.js';
 

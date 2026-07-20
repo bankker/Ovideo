@@ -1,4 +1,4 @@
-import type { Prisma, PrismaClient, Storyboard, Tag } from '@prisma/client';
+import type { Prisma, PrismaClient, Scene as PrismaScene, Storyboard, Tag } from '@prisma/client';
 import type {
   NewShotInput,
   ShotDialogueInput,
@@ -39,7 +39,7 @@ export interface ApplyPatchResult {
 }
 
 type BaseShot = Prisma.ShotGetPayload<{
-  include: { tags: true; dialogue: true; takes: true; dubbingLines: true };
+  include: { tags: true; dialogue: true; takes: true; dubbingLines: true; scene: true };
 }>;
 
 type Entry =
@@ -76,6 +76,8 @@ export async function applyPatch(
                 dialogue: { orderBy: { sortOrder: 'asc' } },
                 takes: true,
                 dubbingLines: true,
+                // 复制镜头时要把它所属的 Scene 一并复制到新版本，故基底查询就带出来
+                scene: true,
               },
             },
           },
@@ -155,31 +157,62 @@ export async function applyPatch(
       });
 
       const changedShotIds: string[] = [];
+      // 本次新版本里已建好的 Scene：
+      // - newSceneIdByKey：同一 patch 内 sceneKey 相同的新镜头共用一条 Scene（只建一次）
+      // - copiedSceneIdByBaseId：同一条基底 Scene 只复制一次，其名下多个镜头共同改指它
+      const newSceneIdByKey = new Map<string, string>();
+      const copiedSceneIdByBaseId = new Map<string, string>();
+      /** 新 Scene id → 其下镜头时长之和，循环末尾一次性写回 estimatedDurationMs */
+      const sceneDurationMs = new Map<string, number>();
+
+      const noteSceneDuration = (sceneId: string | null, durationMs: number) => {
+        if (!sceneId) return;
+        sceneDurationMs.set(sceneId, (sceneDurationMs.get(sceneId) ?? 0) + durationMs);
+      };
+
       let sortOrder = 0;
       for (const entry of entries) {
         if (entry.kind === 'new') {
+          // sceneRef 缺省 = 不归属任何场景（旧行为，兼容对话改分镜等既有调用方）
+          const sceneId = entry.shot.sceneRef
+            ? await ensureNewScene(tx, storyboard.id, entry.shot.sceneRef, newSceneIdByKey)
+            : null;
           const created = await tx.shot.create({
             data: {
               storyboardId: storyboard.id,
               sortOrder,
+              sceneId,
               sourceText: entry.shot.sourceText,
               imagePrompt: entry.shot.imagePrompt,
               videoPrompt: entry.shot.videoPrompt,
               durationPlannedMs: entry.shot.durationPlannedMs,
+              shotSize: entry.shot.shotSize ?? '',
+              cameraAngle: entry.shot.cameraAngle ?? '',
+              cameraMovement: entry.shot.cameraMovement ?? '',
+              composition: entry.shot.composition ?? '',
+              transition: entry.shot.transition ?? '',
               tags: { create: buildShotTagCreates(entry.shot.tags, tagByName) },
               dialogue: { create: buildDialogueCreates(entry.shot.dialogue, tagByName) },
             },
           });
+          // 新镜头尚无锁定时长，计划时长即其对场景时长的贡献
+          noteSceneDuration(sceneId, entry.shot.durationPlannedMs);
           // 本次新增的镜头开启一条新 lineage，以自身 id 为锚点（cuid 由库生成，故只能建后回填）
           await tx.shot.update({ where: { id: created.id }, data: { lineageId: created.id } });
           // 新镜头是空槽（不 stale），但前端需要高亮，故记入 changed
           changedShotIds.push(created.id);
         } else {
           const { base, overrides } = entry;
+          // 基底镜头归属的 Scene 必须在新版本里有一份对应行，否则新 Shot 会指向旧版本的
+          // Scene（跨版本串味，删旧版本时还会被 SetNull 悄悄清空）
+          const sceneId = base.scene
+            ? await copyScene(tx, storyboard.id, base.scene, copiedSceneIdByBaseId)
+            : null;
           const created = await tx.shot.create({
             data: {
               storyboardId: storyboard.id,
               sortOrder,
+              sceneId,
               // 继承基底的 lineage；基底是 lineageId 引入前的存量行时以其自身 id 开锚
               lineageId: base.lineageId ?? base.id,
               sourceText: overrides.sourceText ?? base.sourceText,
@@ -187,6 +220,11 @@ export async function applyPatch(
               videoPrompt: overrides.videoPrompt ?? base.videoPrompt,
               durationPlannedMs: overrides.durationPlannedMs ?? base.durationPlannedMs,
               durationLockedMs: base.durationLockedMs,
+              shotSize: overrides.shotSize ?? base.shotSize,
+              cameraAngle: overrides.cameraAngle ?? base.cameraAngle,
+              cameraMovement: overrides.cameraMovement ?? base.cameraMovement,
+              composition: overrides.composition ?? base.composition,
+              transition: overrides.transition ?? base.transition,
               groupId: base.groupId,
               groupIndex: base.groupIndex,
               keyframeStale: base.keyframeStale,
@@ -279,9 +317,20 @@ export async function applyPatch(
             await tx.shot.update({ where: { id: base.id }, data: { lineageId: base.id } });
           }
 
+          // 时长链路（v2 §3）：配音锁定时长优先，未锁定用计划时长
+          noteSceneDuration(
+            sceneId,
+            base.durationLockedMs ?? overrides.durationPlannedMs ?? base.durationPlannedMs,
+          );
+
           if (changedBaseIds.has(base.id)) changedShotIds.push(created.id);
         }
         sortOrder += 1;
+      }
+
+      // 场景时长 = 其下镜头时长之和，等镜头全部落库后统一写入
+      for (const [sceneId, durationMs] of sceneDurationMs) {
+        await tx.scene.update({ where: { id: sceneId }, data: { estimatedDurationMs: durationMs } });
       }
 
       return { storyboard, changedShotIds, removedShotAssetIds: [...removedAssetIds] };
@@ -297,6 +346,71 @@ export async function applyPatch(
     result.removedShotAssetIds,
   );
   return result;
+}
+
+/**
+ * 为一组带同一 sceneKey 的新镜头建（或复用）Scene 行。
+ * sceneKey 只在本次 patch 内有意义，故缓存也只活在本次版本生成的作用域内。
+ */
+async function ensureNewScene(
+  tx: Prisma.TransactionClient,
+  storyboardId: string,
+  ref: NonNullable<NewShotInput['sceneRef']>,
+  cache: Map<string, string>,
+): Promise<string> {
+  const cached = cache.get(ref.sceneKey);
+  if (cached) return cached;
+  const scene = await tx.scene.create({
+    data: {
+      storyboardId,
+      sortOrder: ref.sortOrder,
+      title: ref.title ?? '',
+      location: ref.location ?? '',
+      interiorExterior: ref.interiorExterior ?? '',
+      timeOfDay: ref.timeOfDay ?? '',
+      sourceText: ref.sourceText ?? '',
+    },
+  });
+  // 新场景开启一条新 lineage，以自身 id 为锚点（cuid 由库生成，故只能建后回填）——
+  // 规则与 Shot.lineageId 完全一致
+  await tx.scene.update({ where: { id: scene.id }, data: { lineageId: scene.id } });
+  cache.set(ref.sceneKey, scene.id);
+  return scene.id;
+}
+
+/**
+ * 把基底版本的一条 Scene 复制到新版本，返回新 Scene id。
+ * 同一条基底 Scene 只复制一次（它名下的多个镜头共享这条新行）。
+ * estimatedDurationMs 不在这里带过来：镜头可能被 update/remove，时长要按新版本实际镜头重算。
+ */
+async function copyScene(
+  tx: Prisma.TransactionClient,
+  storyboardId: string,
+  base: PrismaScene,
+  cache: Map<string, string>,
+): Promise<string> {
+  const cached = cache.get(base.id);
+  if (cached) return cached;
+  const created = await tx.scene.create({
+    data: {
+      storyboardId,
+      sortOrder: base.sortOrder,
+      title: base.title,
+      location: base.location,
+      interiorExterior: base.interiorExterior,
+      timeOfDay: base.timeOfDay,
+      sourceText: base.sourceText,
+      status: base.status,
+      // 继承基底的 lineage；基底是 lineageId 引入前的存量行时以其自身 id 开锚
+      lineageId: base.lineageId ?? base.id,
+    },
+  });
+  // 存量基底行顺手开锚：否则新行指向的 lineage 里查不到基底自己，跨版本追溯会断在这一代
+  if (!base.lineageId) {
+    await tx.scene.update({ where: { id: base.id }, data: { lineageId: base.id } });
+  }
+  cache.set(base.id, created.id);
+  return created.id;
 }
 
 /** 预收集 patch 里全部标签输入（含 dialogue 的 speaker，按 CHARACTER 解析），一次性 findOrCreate */
