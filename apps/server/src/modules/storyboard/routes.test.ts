@@ -110,6 +110,61 @@ describe('storyboard 路由', () => {
     expect(miss.statusCode).toBe(404);
   });
 
+  it('POST apply-patch：返回值带完整 shots（前端拿它播种详情缓存，缺了就会闪空页）', async () => {
+    // (episodeId, version) 唯一，故基底版本号要避开前面用例已占的 1/2
+    const sb = await tdb.db.storyboard.create({
+      data: { episodeId: episode.id, scriptDraftId: draft.id, version: 10 },
+    });
+    const shot = await tdb.db.shot.create({
+      data: { storyboardId: sb.id, sortOrder: 0, sourceText: '基底镜头' },
+    });
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/storyboards/${sb.id}/apply-patch`,
+      payload: {
+        patch: [{ op: 'update_shot', shotId: shot.id, fields: { imagePrompt: '播种校验' } }],
+      },
+    });
+    expect(res.statusCode).toBe(201);
+    const { storyboard } = res.json();
+    expect(Array.isArray(storyboard.shots)).toBe(true);
+    expect(storyboard.shots.length).toBe(1);
+    expect(storyboard.shots[0].imagePrompt).toBe('播种校验');
+    // 形状必须与 GET 详情一致，否则播种出来的是缺字段的假详情
+    expect(Array.isArray(storyboard.shots[0].tags)).toBe(true);
+    expect(Array.isArray(storyboard.shots[0].dialogue)).toBe(true);
+    expect(Array.isArray(storyboard.shots[0].takes)).toBe(true);
+    expect(Array.isArray(storyboard.scenes)).toBe(true);
+  });
+
+  it('GET /api/storyboards/:id：scenes 随详情返回并按 sortOrder 升序，且不嵌套 shots', async () => {
+    const sb = await tdb.db.storyboard.create({
+      data: { episodeId: episode.id, scriptDraftId: draft.id, version: 99 },
+    });
+    // 故意乱序插入，确保断言检验的是 orderBy 而不是插入顺序
+    for (const sortOrder of [2, 0, 1]) {
+      const scene = await tdb.db.scene.create({
+        data: { storyboardId: sb.id, sortOrder, title: `场景${sortOrder}` },
+      });
+      await tdb.db.shot.create({
+        data: { storyboardId: sb.id, sceneId: scene.id, sortOrder, sourceText: `镜头${sortOrder}` },
+      });
+    }
+
+    const res = await app.inject({ method: 'GET', url: `/api/storyboards/${sb.id}` });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.scenes.map((s: { title: string }) => s.title)).toEqual([
+      '场景0',
+      '场景1',
+      '场景2',
+    ]);
+    expect(body.scenes[0].shots).toBeUndefined();
+    // 前端靠 shot.sceneId 分组，故这个外键必须在响应里
+    const sceneIds = body.scenes.map((s: { id: string }) => s.id);
+    for (const s of body.shots) expect(sceneIds).toContain(s.sceneId);
+  });
+
   it('POST apply-patch：未知分镜 404，坏 body 400', async () => {
     const miss = await app.inject({
       method: 'POST',

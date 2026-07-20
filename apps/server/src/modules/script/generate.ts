@@ -1,7 +1,15 @@
 import type { PrismaClient, Tag } from '@prisma/client';
 import { z } from 'zod';
 import type { NewShotInput, StoryboardPatch } from '@ovideo/shared';
-import { NewShotInputSchema } from '@ovideo/shared';
+import {
+  NewShotInputSchema,
+  SHOT_SIZES,
+  CAMERA_ANGLES,
+  CAMERA_MOVEMENTS,
+  TRANSITIONS,
+  SHOT_DURATION_MIN_MS,
+  SHOT_DURATION_MAX_MS,
+} from '@ovideo/shared';
 import { badRequest, notFound } from '../../lib/errors.js';
 import { parseJson } from '../../lib/json.js';
 import { findOrCreateTags } from '../tag/service.js';
@@ -12,19 +20,16 @@ export const SCRIPT_BEGIN = '<<<剧本原文>>>';
 export const SCRIPT_END = '<<<剧本原文结束>>>';
 
 /**
- * 影视语义取值域。
- * 之所以把取值范围写死并塞进提示词，是因为这几个字段后续要驱动镜头检查器与
- * 生图/生视频提示词的自动拼装——模型若自由发挥（"半身中近景微俯"之类），
- * 下游就没法做枚举匹配。给定候选词，模型只做选择题。
+ * 影视语义取值域已迁到 @ovideo/shared（前端镜头检查器要用同一份取值）。
+ * 这里保留转出口，既有的 `from './generate.js'` 导入无需改动。
  */
-export const SHOT_SIZES = ['远景', '全景', '中景', '近景', '特写'] as const;
-export const CAMERA_ANGLES = ['平视', '俯拍', '仰拍', '过肩'] as const;
-export const CAMERA_MOVEMENTS = ['固定', '推', '拉', '摇', '跟'] as const;
-export const TRANSITIONS = ['切', '叠化', '淡入淡出'] as const;
+export { SHOT_SIZES, CAMERA_ANGLES, CAMERA_MOVEMENTS, TRANSITIONS };
 
-/** 单镜头时长区间：视频模型单次只出 5s 或 10s，超过 8s 的镜头在生成侧必然被截断或降质 */
-export const SHOT_DURATION_MIN_MS = 2000;
-export const SHOT_DURATION_MAX_MS = 8000;
+/**
+ * 单镜头时长区间同样迁到 @ovideo/shared（前端检查器与镜头表要用同一份边界），
+ * 这里保留转出口，既有的 `from './generate.js'` 导入无需改动。
+ */
+export { SHOT_DURATION_MIN_MS, SHOT_DURATION_MAX_MS };
 export const SHOT_DURATION_PREFERRED_MS = 4000;
 
 /** 与 job 模块的 JobExecutor 结构兼容（不 import，按结构类型解耦） */

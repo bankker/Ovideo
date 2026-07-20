@@ -10,7 +10,13 @@ import type {
   TakeSlot,
 } from '@ovideo/shared';
 import { api } from './client';
-import { useJob, type JobEntity, type ShotDetail, type StoryboardSummary } from './workflow-hooks';
+import {
+  useJob,
+  type JobEntity,
+  type SceneItem,
+  type ShotDetail,
+  type StoryboardSummary,
+} from './workflow-hooks';
 
 /** ---------- 响应实体类型（形状 = Prisma 模型） ---------- */
 
@@ -50,6 +56,12 @@ export interface ProduceShot extends ShotDetail {
 
 export interface ProduceStoryboardDetail extends StoryboardSummary {
   shots: ProduceShot[];
+  /**
+   * 与 workflow-hooks 的 StoryboardDetail 是同一个响应体（同一个 /storyboards/:id、
+   * 同一个 queryKey），只是这边多声明了 takes。场景树在两处都要读，所以两边都得声明——
+   * 少一边就会出现"运行时有、类型上没有"的静默缺失。
+   */
+  scenes: SceneItem[];
 }
 
 export interface DubbingLineEntity {

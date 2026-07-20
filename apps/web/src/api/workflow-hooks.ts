@@ -52,9 +52,30 @@ export interface DialogueLineItem {
   sortOrder: number;
 }
 
+/** 场景 = 分镜的一级结构，镜头通过 shot.sceneId 归属于它（详情响应里不嵌套 shots，前端自行分组） */
+export interface SceneItem {
+  id: string;
+  storyboardId: string;
+  sortOrder: number;
+  title: string;
+  location: string;
+  interiorExterior: string;
+  timeOfDay: string;
+  sourceText: string;
+  estimatedDurationMs: number;
+  status: string;
+  lineageId: string | null;
+}
+
 export interface ShotDetail {
   id: string;
   storyboardId: string;
+  sceneId: string | null;
+  /**
+   * 跨版本稳定的镜头身份。每次 apply-patch 都会复制出一批新 Shot（id 全换），
+   * 只有 lineageId 在版本之间不变——凡是"同一个镜头在新旧版本里的对应关系"都靠它。
+   */
+  lineageId: string | null;
   sortOrder: number;
   sourceText: string;
   imagePrompt: string;
@@ -66,11 +87,18 @@ export interface ShotDetail {
   keyframeStale: boolean;
   videoStale: boolean;
   staleReasonsJson: string;
+  // 影视语义字段：取值域见 @ovideo/shared 的 SHOT_SIZES 等；未填时服务端存空串而非 null
+  shotSize: string;
+  cameraAngle: string;
+  cameraMovement: string;
+  composition: string;
+  transition: string;
   tags: ShotTagItem[];
   dialogue: DialogueLineItem[];
 }
 
 export interface StoryboardDetail extends StoryboardSummary {
+  scenes: SceneItem[];
   shots: ShotDetail[];
 }
 

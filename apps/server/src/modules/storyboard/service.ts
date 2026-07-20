@@ -1,4 +1,4 @@
-import type { Prisma, PrismaClient, Scene as PrismaScene, Storyboard, Tag } from '@prisma/client';
+import type { Prisma, PrismaClient, Scene as PrismaScene, Tag } from '@prisma/client';
 import type {
   NewShotInput,
   ShotDialogueInput,
@@ -30,8 +30,31 @@ export interface ApplyPatchHooks {
   ) => Promise<void>;
 }
 
+/**
+ * 分镜详情的唯一 include 定义：GET /api/storyboards/:id 与 apply-patch 的返回共用它。
+ * 共用是硬要求——前端拿 apply-patch 的返回直接 setQueryData 播种详情缓存，
+ * 两处形状一旦不同，播种出来的就是缺字段的假详情。
+ * scenes 不嵌套 shots：前端按 shot.sceneId 自行分组，嵌套会让镜头在响应体里出现两遍。
+ */
+export const storyboardDetailInclude = {
+  scenes: { orderBy: { sortOrder: 'asc' } },
+  shots: {
+    orderBy: { sortOrder: 'asc' },
+    include: {
+      tags: { include: { tag: true } },
+      dialogue: { orderBy: { sortOrder: 'asc' } },
+      // takes 带 asset：分镜/视频页的抽卡画廊直接用 uri/thumbUri 渲染
+      takes: { include: { asset: true }, orderBy: { createdAt: 'asc' } },
+    },
+  },
+} satisfies Prisma.StoryboardInclude;
+
+export type StoryboardDetail = Prisma.StoryboardGetPayload<{
+  include: typeof storyboardDetailInclude;
+}>;
+
 export interface ApplyPatchResult {
-  storyboard: Storyboard;
+  storyboard: StoryboardDetail;
   /** 新版本中"被 update 的镜头 + add 的新镜头"的（新）id，供失效传播与前端高亮 */
   changedShotIds: string[];
   /** 被 remove 镜头名下全部 take 的资产 id，供回收站处理——付费产物从不物理删除 */
@@ -345,7 +368,16 @@ export async function applyPatch(
     result.changedShotIds,
     result.removedShotAssetIds,
   );
-  return result;
+
+  // 事务内 create 出来的只是裸 Storyboard 行（没有 shots/scenes），前端却拿它播种详情缓存，
+  // 于是每次编辑后都会闪一帧「该版本没有镜头」。这里按详情 include 重新查一次补全。
+  // 查询放在事务外：事务 timeout 只有 20s，不该把这次读算进去；也在钩子之后，
+  // 好让失效传播刚写下的 stale 标志出现在返回值里。
+  const storyboard = await db.storyboard.findUniqueOrThrow({
+    where: { id: result.storyboard.id },
+    include: storyboardDetailInclude,
+  });
+  return { ...result, storyboard };
 }
 
 /**

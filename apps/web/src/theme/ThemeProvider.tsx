@@ -1,7 +1,7 @@
 import { createContext, useContext, useMemo, useState, type ReactNode } from 'react';
 import { ConfigProvider } from 'antd';
 import zhCN from 'antd/locale/zh_CN';
-import { DEFAULT_TEMPLATE_KEY, getTemplate, UI_TEMPLATES } from './themes';
+import { DEFAULT_TEMPLATE_KEY, getTemplate, scopeTemplateCss, UI_TEMPLATES } from './themes';
 
 const STORAGE_KEY = 'ovideo-ui-template';
 
@@ -46,6 +46,9 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   };
 
   const template = getTemplate(templateKey);
+  // 模板 CSS 一律作用域化：野兽派那套无作用域 + !important 的规则没法靠特异性压过，
+  // 只能让它在中性表面页面（body.surface-neutral）里根本不匹配。
+  const scopedCss = useMemo(() => scopeTemplateCss(template.css), [template.css]);
   const ctx = useMemo(
     () => ({ templateKey: template.key, setTemplateKey, headerLight: template.headerLight }),
     [template.key, template.headerLight],
@@ -54,7 +57,7 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   return (
     <ThemeContext.Provider value={ctx}>
       <ConfigProvider locale={zhCN} theme={template.antd}>
-        <style>{template.css}</style>
+        <style>{scopedCss}</style>
         {children}
       </ConfigProvider>
     </ThemeContext.Provider>

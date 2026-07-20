@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { useParams } from 'react-router-dom';
+import { Link, useParams } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import {
   Alert,
@@ -22,6 +22,7 @@ import {
 } from 'antd';
 import {
   EditOutlined,
+  ExpandOutlined,
   PictureOutlined,
   RobotOutlined,
   ThunderboltOutlined,
@@ -223,6 +224,14 @@ export function StoryboardStage() {
               onChange={(v) => setSelectedStoryboardId(v)}
             />
           </Space>
+        }
+        extra={
+          /* 这一页管"逐镜头抽卡"，工作台管"通读与编排"——两条线并存，不是替代关系 */
+          <Link to={`/projects/${projectId}/episodes/${episodeId}/storyboard/workspace`}>
+            <Button size="small" icon={<ExpandOutlined />}>
+              打开分镜工作台
+            </Button>
+          </Link>
         }
       >
         {staleShots.length > 0 && (

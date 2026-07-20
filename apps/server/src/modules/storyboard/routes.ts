@@ -4,7 +4,7 @@ import type { TagType } from '@ovideo/shared';
 import { ApplyPatchBodySchema } from '@ovideo/shared';
 import { notFound } from '../../lib/errors.js';
 import { findOrCreateTags } from '../tag/service.js';
-import { applyPatch, type ApplyPatchHooks } from './service.js';
+import { applyPatch, storyboardDetailInclude, type ApplyPatchHooks } from './service.js';
 
 export interface StoryboardRoutesOptions {
   db: PrismaClient;
@@ -40,17 +40,7 @@ export const storyboardRoutes: FastifyPluginAsync<StoryboardRoutesOptions> = asy
     const { id } = req.params as { id: string };
     const storyboard = await db.storyboard.findUnique({
       where: { id },
-      include: {
-        shots: {
-          orderBy: { sortOrder: 'asc' },
-          include: {
-            tags: { include: { tag: true } },
-            dialogue: { orderBy: { sortOrder: 'asc' } },
-            // takes 带 asset：分镜/视频页的抽卡画廊直接用 uri/thumbUri 渲染
-            takes: { include: { asset: true }, orderBy: { createdAt: 'asc' } },
-          },
-        },
-      },
+      include: storyboardDetailInclude,
     });
     if (!storyboard) throw notFound('分镜');
     return storyboard;

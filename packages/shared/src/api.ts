@@ -67,6 +67,31 @@ export const ApplyPatchBodySchema = z.object({
   source: z.string().default('manual'),
 });
 
+/**
+ * ---------- 影视语义取值域 ----------
+ * 放在 shared 而不是服务端拆镜模块里：这几个值同时被三处消费——拆镜提示词（约束模型只做选择题）、
+ * 镜头检查器的下拉选项、下游提示词拼装的枚举匹配。任一侧抄一份都会随时间漂移。
+ */
+export const SHOT_SIZES = ['远景', '全景', '中景', '近景', '特写'] as const;
+export const CAMERA_ANGLES = ['平视', '俯拍', '仰拍', '过肩'] as const;
+export const CAMERA_MOVEMENTS = ['固定', '推', '拉', '摇', '跟'] as const;
+export const TRANSITIONS = ['切', '叠化', '淡入淡出'] as const;
+
+/**
+ * 单镜时长的硬边界。
+ * 上限 8s 不是审美偏好：两级生成里一个镜头就是一次视频调用，模型单次上限就是 8 秒，
+ * 填 12s 不会得到 12s 的片子，只会在生成时被截断或降质。下限 2s 是为了避免短到装不下
+ * 一句台词的碎镜。与上面几组枚举同理放在 shared：拆镜提示词、镜头检查器、镜头表三处消费，
+ * 任一侧抄字面量都会随时间漂移。
+ */
+export const SHOT_DURATION_MIN_MS = 2000;
+export const SHOT_DURATION_MAX_MS = 8000;
+
+export type ShotSize = (typeof SHOT_SIZES)[number];
+export type CameraAngle = (typeof CAMERA_ANGLES)[number];
+export type CameraMovement = (typeof CAMERA_MOVEMENTS)[number];
+export type Transition = (typeof TRANSITIONS)[number];
+
 /** ---------- 绑定 ---------- */
 export const PutBindingBodySchema = z.object({
   tagId: z.string(),
